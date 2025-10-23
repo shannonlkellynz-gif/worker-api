@@ -670,43 +670,36 @@ app.post("/timesheets", async (req, res) => {
   }
 });
 
-// ---------- upload (final verified version) ----------
+// ---------- upload (Monday official format) ----------
 app.post("/upload", async (req, res) => {
   try {
-    let { jobId, columnId = "files", fileName = "photo.jpg", base64 } = req.body || {};
+    const { jobId, columnId = "files", fileName = "photo.jpg", base64 } = req.body || {};
     if (!jobId) return res.status(400).json({ ok: false, error: "jobId required" });
     if (!base64) return res.status(400).json({ ok: false, error: "base64 required" });
 
-    // Remove data URI prefix if present
-    base64 = base64.replace(/^data:image\/\w+;base64,/, "");
+    const cleanBase64 = base64.replace(/^data:image\/\w+;base64,/, "");
+    const fileBuffer = Buffer.from(cleanBase64, "base64");
 
-    const buffer = Buffer.from(base64, "base64");
     const form = new FormData();
 
-    // 👇 Monday requires GraphQL "operations" + "map"
+    // Official working GraphQL format
     const operations = JSON.stringify({
-      query: `
-        mutation ($file: File!) {
-          add_file_to_column(
-            item_id: ${Number(jobId)},
-            column_id: "${columnId}",
-            file: $file
-          ) {
-            id
-          }
-        }
-      `,
-      variables: { file: null }
+      query:
+        "mutation addFile($file: File!) { add_file_to_column (item_id: " +
+        Number(jobId) +
+        ', column_id: "' +
+        columnId +
+        '", file: $file) { id } }',
+      variables: { file: null },
     });
 
     const map = JSON.stringify({ "0": ["variables.file"] });
 
     form.append("operations", operations);
     form.append("map", map);
-    form.append("0", buffer, { filename: fileName, contentType: "image/jpeg" });
+    form.append("0", fileBuffer, { filename: fileName, contentType: "image/jpeg" });
 
-    // ✅ Post directly to Monday’s file endpoint
-    const response = await fetch("https://api.monday.com/v2/file", {
+    const uploadRes = await fetch("https://api.monday.com/v2/file", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${process.env.MONDAY_TOKEN}`,
@@ -715,20 +708,20 @@ app.post("/upload", async (req, res) => {
       body: form,
     });
 
-    const text = await response.text();
-    let json;
+    const resultText = await uploadRes.text();
+    let result;
     try {
-      json = JSON.parse(text);
+      result = JSON.parse(resultText);
     } catch {
-      json = { raw: text };
+      result = { raw: resultText };
     }
 
-    if (!response.ok || json.errors) {
-      console.error("UPLOAD ERROR DETAIL:", json);
-      throw new Error(JSON.stringify(json.errors || json));
+    if (!uploadRes.ok || result?.errors) {
+      console.error("UPLOAD ERROR DETAIL:", result);
+      throw new Error(JSON.stringify(result?.errors || result));
     }
 
-    res.json({ ok: true, result: json });
+    res.json({ ok: true, result });
   } catch (e) {
     console.error("ERROR /upload:", e);
     res.status(500).json({ ok: false, error: e?.message || String(e) });
