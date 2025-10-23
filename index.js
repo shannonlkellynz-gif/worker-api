@@ -670,7 +670,7 @@ app.post("/timesheets", async (req, res) => {
   }
 });
 
-// ---------- upload (Monday multipart; sends correct Content-Type + boundary) ----------
+// ---------- upload (Monday multipart: query + variables[file]) ----------
 app.post("/upload", async (req, res) => {
   try {
     const {
@@ -678,58 +678,53 @@ app.post("/upload", async (req, res) => {
       columnId = "file_mkvr42v",      // your Progress column
       fileName = "photo.jpg",
       base64,
+      mime = "image/jpeg",
     } = req.body || {};
 
     if (!jobId) return res.status(400).json({ ok: false, error: "jobId required" });
     if (!base64) return res.status(400).json({ ok: false, error: "base64 required" });
 
-    // strip data URL prefix if present
+    // Strip data URL prefix if present
     const clean = base64.replace(/^data:[^;]+;base64,/, "");
-    const buf = Buffer.from(clean, "base64");
+    const buffer = Buffer.from(clean, "base64");
 
     const form = new FormData();
 
-    // EXACT shape Monday expects
+    // This is a valid Monday pattern: "query" + "variables[file]"
     form.append(
-      "operations",
-      JSON.stringify({
-        query: `mutation ($file: File!) {
-          add_file_to_column(item_id: ${Number(jobId)}, column_id: "${columnId}", file: $file) { id }
-        }`,
-        variables: { file: null },
-      })
+      "query",
+      `mutation ($file: File!) {
+        add_file_to_column(item_id: ${Number(jobId)}, column_id: "${columnId}", file: $file) { id }
+      }`
     );
-    form.append("map", JSON.stringify({ "1": ["variables.file"] }));
-    form.append("1", buf, { filename: fileName, contentType: "image/jpeg" });
+    form.append("variables[file]", buffer, { filename: fileName, contentType: mime });
 
-    // IMPORTANT: include form-data's headers so the boundary is correct
+    // VERY IMPORTANT: include multipart headers from form-data
     const headers = {
-      ...form.getHeaders(),                        // <- adds proper multipart boundary
+      ...form.getHeaders(),                // adds Content-Type with boundary
       Authorization: `Bearer ${MONDAY_TOKEN}`,
-      // DO NOT set your own Content-Type; form.getHeaders() already did.
     };
 
-    const r = await fetch("https://api.monday.com/v2/file", {
+    const resp = await fetch("https://api.monday.com/v2/file", {
       method: "POST",
       headers,
       body: form,
     });
 
-    // Monday sometimes returns non-2xx with JSON body
-    const text = await r.text();
-    let j;
-    try { j = JSON.parse(text); } catch { j = null; }
+    const text = await resp.text();
+    let json;
+    try { json = JSON.parse(text); } catch { json = null; }
 
-    if (!r.ok || j?.errors) {
-      console.error("UPLOAD ERROR DETAIL:", j || text);
+    if (!resp.ok || json?.errors) {
+      console.error("UPLOAD ERROR DETAIL:", json || text);
       return res.status(502).json({
         ok: false,
-        error: j?.errors?.[0]?.message || j?.error_message || text || "Upload failed",
-        details: j || text,
+        error: json?.errors?.[0]?.message || json?.error_message || text || "Upload failed",
+        details: json || text,
       });
     }
 
-    return res.json({ ok: true, id: j?.data?.add_file_to_column?.id || null });
+    return res.json({ ok: true, id: json?.data?.add_file_to_column?.id || null });
   } catch (err) {
     console.error("ERROR /upload:", err);
     return res.status(500).json({ ok: false, error: err?.message || "Server error" });
