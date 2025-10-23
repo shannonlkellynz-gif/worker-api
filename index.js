@@ -670,47 +670,73 @@ app.post("/timesheets", async (req, res) => {
   }
 });
 
-// ---------- upload (new bulletproof version) ----------
+/// ---------- upload (dual-mode: multipart OR legacy JSON base64) ----------
 const multer = require("multer");
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 20 * 1024 * 1024 }, // 20 MB cap
+  limits: { fileSize: 20 * 1024 * 1024 }, // 20MB cap
 });
 
 app.post("/upload", upload.single("file"), async (req, res) => {
   const start = Date.now();
   try {
-    const { itemId, columnId } = req.body || {};
-    if (!itemId || !columnId)
-      return res.status(400).json({ ok: false, code: "E_BAD_INPUT", msg: "Missing itemId/columnId" });
-    if (!req.file)
-      return res.status(400).json({ ok: false, code: "E_NO_FILE", msg: "No file received (multer)" });
+    // ---- Legacy JSON fallback (jobId + base64) ----
+    let legacyBuf = null, legacyName = null, legacyType = null, legacyItemId = null, legacyColumnId = null;
 
+    if (!req.file && req.is("application/json") && req.body) {
+      const { jobId, base64, fileName = "photo.jpg", mime = "image/jpeg", columnId } = req.body;
+      if (jobId && base64) {
+        const cleanB64 = String(base64).replace(/^data:[^;]+;base64,/, "");
+        legacyBuf = Buffer.from(cleanB64, "base64");
+        legacyName = fileName;
+        legacyType = mime;
+        legacyItemId = jobId;
+        legacyColumnId = columnId;
+      }
+    }
+
+    // ---- Unify inputs (prefer multipart; else legacy) ----
+    const itemId = Number((req.body && req.body.itemId) || legacyItemId);
+    const columnId = (req.body && req.body.columnId) || legacyColumnId;
+    const fileBuffer = req.file ? req.file.buffer : legacyBuf;
+    const fileName = req.file ? (req.file.originalname || "photo.jpg") : (legacyName || "photo.jpg");
+    const fileType = req.file ? (req.file.mimetype || "image/jpeg") : (legacyType || "image/jpeg");
+
+    // ---- Validate inputs ----
+    if (!itemId || !columnId) {
+      return res.status(400).json({ ok: false, code: "E_BAD_INPUT", msg: "Missing itemId/columnId" });
+    }
+    if (!fileBuffer) {
+      return res.status(400).json({ ok: false, code: "E_NO_FILE", msg: "No file received (multipart or base64)" });
+    }
+
+    // ---- Build GraphQL multipart for Monday ----
     const operations = JSON.stringify({
       query: `
         mutation ($file: File!, $item_id: Int!, $column_id: String!) {
           add_file_to_column(file: $file, item_id: $item_id, column_id: $column_id) { id }
         }`,
-      variables: { file: null, item_id: Number(itemId), column_id: columnId },
+      variables: { file: null, item_id: itemId, column_id: columnId },
     });
     const map = JSON.stringify({ "0": ["variables.file"] });
 
     const form = new FormData();
     form.append("operations", operations);
     form.append("map", map);
-    form.append("0", req.file.buffer, {
-      filename: req.file.originalname || "photo.jpg",
-      contentType: req.file.mimetype || "image/jpeg",
-      knownLength: req.file.size,
+    form.append("0", fileBuffer, {
+      filename: fileName,
+      contentType: fileType,
+      knownLength: fileBuffer.length,
     });
 
+    // ---- Post to Monday with a hard timeout ----
     const MONDAY_FILE_API = "https://api.monday.com/v2/file";
     const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), 60000); // 60 s timeout
+    const timer = setTimeout(() => ac.abort(), 60_000); // 60s
 
     const r = await fetch(MONDAY_FILE_API, {
       method: "POST",
-      headers: { Authorization: process.env.MONDAY_TOKEN },
+      headers: { Authorization: process.env.MONDAY_TOKEN }, // no "Bearer "
       body: form,
       signal: ac.signal,
     }).catch((e) => {
@@ -731,26 +757,26 @@ app.post("/upload", upload.single("file"), async (req, res) => {
       });
     }
 
-    res.json({
+    return res.json({
       ok: true,
       took_ms: Date.now() - start,
       result: json || text,
-      file_bytes: req.file.size,
+      file_bytes: fileBuffer.length,
     });
   } catch (err) {
-    const msg = String(err);
+    const msg = String(err || "");
     let code = "E_UNKNOWN";
     if (msg.includes("E_MONDAY_FETCH")) code = "E_MONDAY_FETCH";
     if (msg.includes("aborted")) code = "E_TIMEOUT";
     if (msg.includes("too large") || msg.includes("LIMIT_FILE_SIZE")) code = "E_FILE_TOO_LARGE";
-    res.status(500).json({ ok: false, code, msg });
+    return res.status(500).json({ ok: false, code, msg });
   }
 });
 
-// Global multer error handler
+// Global multer error handler (returns JSON instead of crashing)
 app.use((err, req, res, next) => {
   if (err && err.code === "LIMIT_FILE_SIZE") {
-    return res.status(413).json({ ok: false, code: "E_FILE_TOO_LARGE", msg: "File exceeds 20 MB" });
+    return res.status(413).json({ ok: false, code: "E_FILE_TOO_LARGE", msg: "File exceeds 20MB" });
   }
   next(err);
 });
