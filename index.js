@@ -671,7 +671,7 @@ app.post("/timesheets", async (req, res) => {
 });
 
 // ---------- upload (dual-mode: multipart OR legacy JSON base64) ----------
-const multer = require("multer"); // add at top of file if not present
+const multer = require("multer"); // ensure installed: npm install multer
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 20 * 1024 * 1024 }, // 20MB cap
@@ -702,7 +702,7 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     const fileName = req.file ? (req.file.originalname || "photo.jpg") : (legacyName || "photo.jpg");
     const fileType = req.file ? (req.file.mimetype || "image/jpeg") : (legacyType || "image/jpeg");
 
-    // --- DEBUG: see what the server actually received ---
+    // --- DEBUG ---
     console.log("UPLOAD DEBUG →", {
       ct: req.headers["content-type"],
       len: req.headers["content-length"],
@@ -713,7 +713,7 @@ app.post("/upload", upload.single("file"), async (req, res) => {
       fileBytes: fileBuffer ? fileBuffer.length : 0,
     });
 
-    // ---- Validate inputs (return clear 400s, no crashes) ----
+    // ---- Validate ----
     if (!itemId || !columnId) {
       return res.status(400).json({ ok: false, code: "E_BAD_INPUT", msg: "Missing itemId/columnId" });
     }
@@ -740,14 +740,17 @@ app.post("/upload", upload.single("file"), async (req, res) => {
       knownLength: fileBuffer.length,
     });
 
-    // ---- Post to Monday with a hard timeout ----
+    // ---- Post to Monday with proper multipart headers + timeout ----
     const MONDAY_FILE_API = "https://api.monday.com/v2/file";
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), 60_000); // 60s
 
     const r = await fetch(MONDAY_FILE_API, {
       method: "POST",
-      headers: { Authorization: process.env.MONDAY_TOKEN }, // note: no "Bearer "
+      headers: {
+        Authorization: process.env.MONDAY_TOKEN, // no "Bearer "
+        ...form.getHeaders(),                   // <-- REQUIRED so Monday sees the boundary
+      },
       body: form,
       signal: ac.signal,
     }).catch((e) => {
@@ -756,8 +759,7 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     clearTimeout(timer);
 
     const text = await r.text();
-    let json;
-    try { json = JSON.parse(text); } catch {}
+    let json; try { json = JSON.parse(text); } catch {}
 
     console.log("UPLOAD DEBUG ← Monday", r.status, (text || "").slice(0, 300));
 
@@ -787,7 +789,7 @@ app.post("/upload", upload.single("file"), async (req, res) => {
   }
 });
 
-// Global multer error handler (returns JSON instead of crashing)
+// Global multer error handler
 app.use((err, req, res, next) => {
   if (err && err.code === "LIMIT_FILE_SIZE") {
     return res.status(413).json({ ok: false, code: "E_FILE_TOO_LARGE", msg: "File exceeds 20MB" });
