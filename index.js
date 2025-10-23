@@ -670,7 +670,7 @@ app.post("/timesheets", async (req, res) => {
   }
 });
 
-/ ---------- upload (GraphQL multipart: operations + map + file) ----------
+// ---------- upload (GraphQL multipart: operations + map + file) ----------
 app.post("/upload", async (req, res) => {
   try {
     let {
