@@ -670,31 +670,31 @@ app.post("/timesheets", async (req, res) => {
   }
 });
 
-// ---------- upload (GraphQL multipart: operations + map + file) ----------
+// ---------- upload (Monday.com compliant multipart upload) ----------
 app.post("/upload", async (req, res) => {
   try {
-    let {
+    const {
       jobId,
-      columnId = "file_mkvr42v", // <-- your target column
+      columnId = "file_mkvr42v", // ✅ Your target column
       fileName = "photo.jpg",
       base64,
       mime = "image/jpeg",
     } = req.body || {};
 
-    if (!jobId) return res.status(400).json({ error: "jobId required" });
-    if (!base64) return res.status(400).json({ error: "base64 required" });
+    if (!jobId) return res.status(400).json({ ok: false, error: "jobId required" });
+    if (!base64) return res.status(400).json({ ok: false, error: "base64 required" });
 
-    // allow data URL; strip prefix if present
-    const data = base64.replace(/^data:[^;]+;base64,/, "");
-    const buf = Buffer.from(data, "base64");
+    // Strip data URL prefix if included
+    const cleanBase64 = base64.replace(/^data:[^;]+;base64,/, "");
+    const buf = Buffer.from(cleanBase64, "base64");
 
     const form = new FormData();
 
-    // GraphQL multipart spec
+    // 1️⃣ GraphQL multipart spec: "operations" + "map" + binary file part
     const operations = {
       query: `
-        mutation ($file: File!) {
-          add_file_to_column (item_id: ${Number(jobId)}, column_id: "${columnId}", file: $file) {
+        mutation addFile($file: File!) {
+          add_file_to_column(item_id: ${Number(jobId)}, column_id: "${columnId}", file: $file) {
             id
           }
         }
@@ -708,23 +708,32 @@ app.post("/upload", async (req, res) => {
     form.append("map", JSON.stringify(map));
     form.append("0", buf, { filename: fileName, contentType: mime });
 
-    const r = await fetch(MONDAY_FILE_API, {
+    // 2️⃣ Send to Monday’s file endpoint
+    const r = await fetch("https://api.monday.com/v2/file", {
       method: "POST",
-      headers: { Authorization: `Bearer ${MONDAY_TOKEN}` },
-      body: form, // do NOT set Content-Type manually
+      headers: {
+        Authorization: `Bearer ${MONDAY_TOKEN}`,
+      },
+      body: form, // FormData auto-sets multipart boundaries
     });
 
     const j = await r.json();
+
+    // 3️⃣ Handle Monday response
     if (!r.ok || j.errors) {
       console.error("UPLOAD ERROR DETAIL:", j);
-      return res.status(502).json({ error: j?.error_message || "Upload failed", details: j });
+      return res.status(502).json({
+        ok: false,
+        error: j?.errors?.[0]?.message || "Upload failed",
+        details: j,
+      });
     }
 
-    const id = j?.data?.add_file_to_column?.id || null;
-    return res.json({ ok: true, id });
-  } catch (e) {
-    console.error("ERROR /upload:", e);
-    return res.status(500).json({ error: e?.message || "Server error" });
+    const uploadedId = j?.data?.add_file_to_column?.id;
+    return res.json({ ok: true, id: uploadedId });
+  } catch (err) {
+    console.error("ERROR /upload:", err);
+    return res.status(500).json({ ok: false, error: err.message });
   }
 });
 
