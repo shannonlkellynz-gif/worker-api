@@ -669,90 +669,97 @@ app.post("/timesheets", async (req, res) => {
   }
 });
 
-// ---------- upload (dual-mode: multipart OR legacy JSON base64) ----------
+// ---------- upload (dual-mode: client-multipart OR legacy JSON) ----------
+const multer = require("multer");
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 20 * 1024 * 1024 }, // 20MB cap
+  limits: { fileSize: 20 * 1024 * 1024 }, // 20MB
 });
 
 app.post("/upload", upload.single("file"), async (req, res) => {
   const start = Date.now();
   try {
-    // ---- Legacy JSON fallback (jobId + base64) ----
-    let legacyBuf = null, legacyName = null, legacyType = null, legacyItemId = null, legacyColumnId = null;
-
-    if (!req.file && req.is("application/json") && req.body) {
+    // Detect legacy JSON payload (jobId + base64)
+    let legacy = { buf: null, name: null, type: null, itemId: null, columnId: null };
+    const isJson = !req.file && req.is("application/json") && req.body;
+    if (isJson) {
       const { jobId, base64, fileName = "photo.jpg", mime = "image/jpeg", columnId } = req.body;
       if (jobId && base64) {
-        const cleanB64 = String(base64).replace(/^data:[^;]+;base64,/, "");
-        legacyBuf = Buffer.from(cleanB64, "base64");
-        legacyName = fileName;
-        legacyType = mime;
-        legacyItemId = jobId;
-        legacyColumnId = columnId;
+        const clean = String(base64).replace(/^data:[^;]+;base64,/, "");
+        legacy.buf = Buffer.from(clean, "base64");
+        legacy.name = fileName;
+        legacy.type = mime;
+        legacy.itemId = Number(jobId);
+        legacy.columnId = columnId;
       }
     }
 
-    // ---- Unify inputs (prefer multipart; else legacy) ----
-    const itemId = Number((req.body && req.body.itemId) || legacyItemId);
-    const columnId = (req.body && req.body.columnId) || legacyColumnId;
-    const fileBuffer = req.file ? req.file.buffer : legacyBuf;
-    const fileName = req.file ? (req.file.originalname || "photo.jpg") : (legacyName || "photo.jpg");
-    const fileType = req.file ? (req.file.mimetype || "image/jpeg") : (legacyType || "image/jpeg");
+    // Unify inputs
+    const itemId   = Number((req.body && req.body.itemId) || legacy.itemId);
+    const columnId = (req.body && req.body.columnId) || legacy.columnId;
+    const buf      = req.file ? req.file.buffer : legacy.buf;
+    const fname    = req.file ? (req.file.originalname || "photo.jpg") : (legacy.name || "photo.jpg");
+    const ftype    = req.file ? (req.file.mimetype   || "image/jpeg")  : (legacy.type || "image/jpeg");
 
-    // --- DEBUG ---
+    // Debug
     console.log("UPLOAD DEBUG →", {
       ct: req.headers["content-type"],
       len: req.headers["content-length"],
       hasFile: !!req.file,
       bodyKeys: Object.keys(req.body || {}),
-      itemId,
-      columnId,
-      fileBytes: fileBuffer ? fileBuffer.length : 0,
+      itemId, columnId,
+      fileBytes: buf ? buf.length : 0,
     });
 
-    // ---- Validate ----
-    if (!itemId || !columnId) {
+    // Validate
+    if (!itemId || !columnId)
       return res.status(400).json({ ok: false, code: "E_BAD_INPUT", msg: "Missing itemId/columnId" });
-    }
-    if (!fileBuffer || !fileBuffer.length) {
+    if (!buf || !buf.length)
       return res.status(400).json({ ok: false, code: "E_NO_FILE", msg: "No file received (multipart 'file' or JSON 'base64')" });
+
+    // Build the multipart for Monday — choose format based on input mode
+    const MONDAY_FILE_API = "https://api.monday.com/v2/file";
+    let form;
+
+    if (req.file) {
+      // ✅ Path A: client sent multipart → use GraphQL operations/map
+      const operations = JSON.stringify({
+        query: `
+          mutation ($file: File!, $item_id: Int!, $column_id: String!) {
+            add_file_to_column(file: $file, item_id: $item_id, column_id: $column_id) { id }
+          }`,
+        variables: { file: null, item_id: itemId, column_id: columnId },
+      });
+      const map = JSON.stringify({ "0": ["variables.file"] });
+
+      form = new FormData();
+      form.append("operations", operations);
+      form.append("map", map);
+      form.append("0", buf, { filename: fname, contentType: ftype, knownLength: buf.length });
+    } else {
+      // ✅ Path B: legacy JSON/base64 → use Monday's legacy multipart (query + variables[file])
+      const gql = `
+        mutation ($file: File!) {
+          add_file_to_column(item_id: ${itemId}, column_id: "${columnId}", file: $file) { id }
+        }`;
+      form = new FormData();
+      form.append("query", gql.trim());
+      form.append("variables[file]", buf, { filename: fname, contentType: ftype, knownLength: buf.length });
     }
 
-    // ---- Build GraphQL multipart for Monday ----
-    const operations = JSON.stringify({
-      query: `
-        mutation ($file: File!, $item_id: Int!, $column_id: String!) {
-          add_file_to_column(file: $file, item_id: $item_id, column_id: $column_id) { id }
-        }`,
-      variables: { file: null, item_id: itemId, column_id: columnId },
-    });
-    const map = JSON.stringify({ "0": ["variables.file"] });
-
-    const form = new FormData();
-    form.append("operations", operations);
-    form.append("map", map);
-    form.append("0", fileBuffer, {
-      filename: fileName,
-      contentType: fileType,
-      knownLength: fileBuffer.length,
-    });
-
-    // ---- Post to Monday with proper multipart headers + timeout ----
+    // Send to Monday (include boundary headers)
     const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), 60_000); // 60s
+    const timer = setTimeout(() => ac.abort(), 60_000);
 
     const r = await fetch(MONDAY_FILE_API, {
       method: "POST",
       headers: {
-        Authorization: process.env.MONDAY_TOKEN, // NOTE: Monday expects raw token (no "Bearer ")
-        ...form.getHeaders(),                    // include boundary
+        Authorization: process.env.MONDAY_TOKEN,  // raw token, no "Bearer "
+        ...form.getHeaders(),                     // boundary etc.
       },
       body: form,
       signal: ac.signal,
-    }).catch((e) => {
-      throw new Error("E_MONDAY_FETCH:" + e.message);
-    });
+    }).catch((e) => { throw new Error("E_MONDAY_FETCH:" + e.message); });
     clearTimeout(timer);
 
     const text = await r.text();
@@ -769,24 +776,19 @@ app.post("/upload", upload.single("file"), async (req, res) => {
       });
     }
 
-    return res.json({
-      ok: true,
-      took_ms: Date.now() - start,
-      result: json || text,
-      file_bytes: fileBuffer.length,
-    });
+    return res.json({ ok: true, took_ms: Date.now() - start, result: json || text, file_bytes: buf.length });
   } catch (err) {
     const msg = String(err || "");
     let code = "E_UNKNOWN";
     if (msg.includes("E_MONDAY_FETCH")) code = "E_MONDAY_FETCH";
-    if (msg.includes("aborted")) code = "E_TIMEOUT";
-    if (msg.includes("too large") || msg.includes("LIMIT_FILE_SIZE")) code = "E_FILE_TOO_LARGE";
+    if (msg.includes("aborted"))        code = "E_TIMEOUT";
+    if (msg.includes("LIMIT_FILE_SIZE"))code = "E_FILE_TOO_LARGE";
     console.error("UPLOAD DEBUG ✖", code, msg);
     return res.status(500).json({ ok: false, code, msg });
   }
 });
 
-// Global multer error handler (returns JSON instead of crashing)
+// Multer error handler
 app.use((err, req, res, next) => {
   if (err && err.code === "LIMIT_FILE_SIZE") {
     return res.status(413).json({ ok: false, code: "E_FILE_TOO_LARGE", msg: "File exceeds 20MB" });
