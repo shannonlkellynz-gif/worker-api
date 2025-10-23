@@ -670,35 +670,45 @@ app.post("/timesheets", async (req, res) => {
   }
 });
 
-// ---------- upload (photos/files) ----------
+// ---------- upload (GraphQL multipart spec: operations + map) ----------
 app.post("/upload", async (req, res) => {
   try {
     let { jobId, columnId = "files", fileName = "photo.jpg", base64 } = req.body || {};
     if (!jobId) return res.status(400).json({ ok: false, error: "jobId required" });
     if (!base64) return res.status(400).json({ ok: false, error: "base64 required" });
 
-    // Remove any base64 header prefix
+    // Strip any data URL prefix
     base64 = base64.replace(/^data:image\/\w+;base64,/, "");
 
     const buf = Buffer.from(base64, "base64");
+
+    // Build multipart body per GraphQL multipart request spec
     const form = new FormData();
 
-    // ✅ Proper GraphQL mutation for Monday file upload
-    const mutation = `
-      mutation addFile($file: File!) {
-        add_file_to_column(item_id: ${Number(jobId)}, column_id: "${columnId}", file: $file) {
-          id
+    // 1) operations: GraphQL payload with variables.file = null (to be injected via map)
+    const operations = {
+      query: `
+        mutation ($file: File!) {
+          add_file_to_column(
+            item_id: ${Number(jobId)},
+            column_id: "${columnId}",
+            file: $file
+          ) { id }
         }
-      }
-    `;
+      `,
+      variables: { file: null }
+    };
+    form.append("operations", JSON.stringify(operations));
 
-    form.append("query", mutation);
-    form.append("variables[file]", buf, {
-      filename: fileName,
-      contentType: "image/jpeg",
-    });
+    // 2) map: which form parts go into which variable paths
+    //    "0" is the name of the file part; it maps to variables.file
+    const map = { "0": ["variables.file"] };
+    form.append("map", JSON.stringify(map));
 
-    // ✅ Post directly to Monday file endpoint
+    // 3) the file itself, under field name "0"
+    form.append("0", buf, { filename: fileName, contentType: "image/jpeg" });
+
+    // Send to Monday file endpoint
     const r = await fetch("https://api.monday.com/v2/file", {
       method: "POST",
       headers: {
@@ -708,10 +718,16 @@ app.post("/upload", async (req, res) => {
       body: form,
     });
 
-    const j = await r.json();
-    if (j.errors) throw new Error(JSON.stringify(j.errors));
+    const text = await r.text();
+    let json;
+    try { json = JSON.parse(text); } catch { json = { raw: text }; }
 
-    return res.json({ ok: true, result: j });
+    if (!r.ok || json?.errors) {
+      // Bubble up the exact Monday error so we can see column/item issues
+      throw new Error(JSON.stringify(json?.errors || json));
+    }
+
+    return res.json({ ok: true, result: json });
   } catch (e) {
     console.error("ERROR /upload:", e);
     return res.status(500).json({ ok: false, error: e?.message || String(e) });
