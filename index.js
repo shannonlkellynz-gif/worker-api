@@ -673,25 +673,48 @@ app.post("/timesheets", async (req, res) => {
 // ---------- upload (photos/files) ----------
 app.post("/upload", async (req, res) => {
   try {
-    const { jobId, columnId = "files", fileName = "photo.jpg", base64 } = req.body || {};
-    if (!jobId)  return res.status(400).json({ error: "jobId required" });
-    if (!base64) return res.status(400).json({ error: "base64 required" });
+    let { jobId, columnId = "files", fileName = "photo.jpg", base64 } = req.body || {};
+    if (!jobId) return res.status(400).json({ ok: false, error: "jobId required" });
+    if (!base64) return res.status(400).json({ ok: false, error: "base64 required" });
+
+    // Remove any base64 header prefix
+    base64 = base64.replace(/^data:image\/\w+;base64,/, "");
 
     const buf = Buffer.from(base64, "base64");
     const form = new FormData();
-    const gql = `
-      mutation ($file: File!) {
-        add_file_to_column(item_id:${Number(jobId)}, column_id:"${columnId}", file:$file) { id }
+
+    // ✅ Proper GraphQL mutation for Monday file upload
+    const mutation = `
+      mutation addFile($file: File!) {
+        add_file_to_column(item_id: ${Number(jobId)}, column_id: "${columnId}", file: $file) {
+          id
+        }
       }
     `;
-    form.append("query", gql);
-    form.append("variables[file]", buf, { filename: fileName, contentType: "image/jpeg" });
 
-    const r = await monday("", {}, true, form);
-    return res.json({ ok: true, result: r });
+    form.append("query", mutation);
+    form.append("variables[file]", buf, {
+      filename: fileName,
+      contentType: "image/jpeg",
+    });
+
+    // ✅ Post directly to Monday file endpoint
+    const r = await fetch("https://api.monday.com/v2/file", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.MONDAY_TOKEN}`,
+        ...form.getHeaders(),
+      },
+      body: form,
+    });
+
+    const j = await r.json();
+    if (j.errors) throw new Error(JSON.stringify(j.errors));
+
+    return res.json({ ok: true, result: j });
   } catch (e) {
     console.error("ERROR /upload:", e);
-    res.status(500).json({ error: e?.message || String(e) });
+    return res.status(500).json({ ok: false, error: e?.message || String(e) });
   }
 });
 
