@@ -4,9 +4,8 @@ const cors = require("cors");
 const dotenv = require("dotenv");
 const FormData = require("form-data");
 const compression = require("compression");
-
-// If your Node version doesn't have global fetch, uncomment the next line:
-// global.fetch = require("node-fetch");
+const multer = require("multer");               // NEW
+const fetch = require("node-fetch");            // Force node-fetch v2 for multipart compatibility
 
 dotenv.config();
 
@@ -19,7 +18,7 @@ app.use(cors());
 // gzip compression early
 app.use(compression({ level: 6 }));
 
-// Larger body limits (for base64 image uploads)
+// Larger body limits (for base64 image uploads, legacy client)
 app.use(express.json({ limit: "25mb" }));
 app.use(express.urlencoded({ limit: "25mb", extended: true }));
 
@@ -671,7 +670,6 @@ app.post("/timesheets", async (req, res) => {
 });
 
 // ---------- upload (dual-mode: multipart OR legacy JSON base64) ----------
-const multer = require("multer"); // ensure installed: npm install multer
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 20 * 1024 * 1024 }, // 20MB cap
@@ -741,15 +739,14 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     });
 
     // ---- Post to Monday with proper multipart headers + timeout ----
-    const MONDAY_FILE_API = "https://api.monday.com/v2/file";
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), 60_000); // 60s
 
     const r = await fetch(MONDAY_FILE_API, {
       method: "POST",
       headers: {
-        Authorization: process.env.MONDAY_TOKEN, // no "Bearer "
-        ...form.getHeaders(),                   // <-- REQUIRED so Monday sees the boundary
+        Authorization: process.env.MONDAY_TOKEN, // NOTE: Monday expects raw token (no "Bearer ")
+        ...form.getHeaders(),                    // include boundary
       },
       body: form,
       signal: ac.signal,
@@ -789,13 +786,14 @@ app.post("/upload", upload.single("file"), async (req, res) => {
   }
 });
 
-// Global multer error handler
+// Global multer error handler (returns JSON instead of crashing)
 app.use((err, req, res, next) => {
   if (err && err.code === "LIMIT_FILE_SIZE") {
     return res.status(413).json({ ok: false, code: "E_FILE_TOO_LARGE", msg: "File exceeds 20MB" });
   }
   next(err);
 });
+
 // ---------- server ----------
 const server = app.listen(Number(PORT), () => console.log("API running on :" + PORT));
 server.keepAliveTimeout = 65000;
