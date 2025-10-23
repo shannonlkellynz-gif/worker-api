@@ -670,8 +670,8 @@ app.post("/timesheets", async (req, res) => {
   }
 });
 
-/// ---------- upload (dual-mode: multipart OR legacy JSON base64) ----------
-const multer = require("multer");
+// ---------- upload (dual-mode: multipart OR legacy JSON base64) ----------
+const multer = require("multer"); // add at top of file if not present
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 20 * 1024 * 1024 }, // 20MB cap
@@ -702,12 +702,23 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     const fileName = req.file ? (req.file.originalname || "photo.jpg") : (legacyName || "photo.jpg");
     const fileType = req.file ? (req.file.mimetype || "image/jpeg") : (legacyType || "image/jpeg");
 
-    // ---- Validate inputs ----
+    // --- DEBUG: see what the server actually received ---
+    console.log("UPLOAD DEBUG →", {
+      ct: req.headers["content-type"],
+      len: req.headers["content-length"],
+      hasFile: !!req.file,
+      bodyKeys: Object.keys(req.body || {}),
+      itemId,
+      columnId,
+      fileBytes: fileBuffer ? fileBuffer.length : 0,
+    });
+
+    // ---- Validate inputs (return clear 400s, no crashes) ----
     if (!itemId || !columnId) {
       return res.status(400).json({ ok: false, code: "E_BAD_INPUT", msg: "Missing itemId/columnId" });
     }
-    if (!fileBuffer) {
-      return res.status(400).json({ ok: false, code: "E_NO_FILE", msg: "No file received (multipart or base64)" });
+    if (!fileBuffer || !fileBuffer.length) {
+      return res.status(400).json({ ok: false, code: "E_NO_FILE", msg: "No file received (multipart 'file' or JSON 'base64')" });
     }
 
     // ---- Build GraphQL multipart for Monday ----
@@ -736,7 +747,7 @@ app.post("/upload", upload.single("file"), async (req, res) => {
 
     const r = await fetch(MONDAY_FILE_API, {
       method: "POST",
-      headers: { Authorization: process.env.MONDAY_TOKEN }, // no "Bearer "
+      headers: { Authorization: process.env.MONDAY_TOKEN }, // note: no "Bearer "
       body: form,
       signal: ac.signal,
     }).catch((e) => {
@@ -747,6 +758,8 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     const text = await r.text();
     let json;
     try { json = JSON.parse(text); } catch {}
+
+    console.log("UPLOAD DEBUG ← Monday", r.status, (text || "").slice(0, 300));
 
     if (!r.ok || (json && json.errors)) {
       return res.status(502).json({
@@ -769,6 +782,7 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     if (msg.includes("E_MONDAY_FETCH")) code = "E_MONDAY_FETCH";
     if (msg.includes("aborted")) code = "E_TIMEOUT";
     if (msg.includes("too large") || msg.includes("LIMIT_FILE_SIZE")) code = "E_FILE_TOO_LARGE";
+    console.error("UPLOAD DEBUG ✖", code, msg);
     return res.status(500).json({ ok: false, code, msg });
   }
 });
