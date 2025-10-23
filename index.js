@@ -670,56 +670,51 @@ app.post("/timesheets", async (req, res) => {
   }
 });
 
-// ---------- upload (Monday.com compliant multipart upload) ----------
+// ---------- upload (final tested Monday.com multipart upload) ----------
 app.post("/upload", async (req, res) => {
   try {
     const {
       jobId,
-      columnId = "file_mkvr42v", // ✅ Your target column
+      columnId = "file_mkvr42v", // ✅ target column
       fileName = "photo.jpg",
       base64,
-      mime = "image/jpeg",
     } = req.body || {};
 
     if (!jobId) return res.status(400).json({ ok: false, error: "jobId required" });
     if (!base64) return res.status(400).json({ ok: false, error: "base64 required" });
 
-    // Strip data URL prefix if included
+    // clean the base64
     const cleanBase64 = base64.replace(/^data:[^;]+;base64,/, "");
     const buf = Buffer.from(cleanBase64, "base64");
 
+    // ✅ Monday requires exactly this multipart shape
     const form = new FormData();
-
-    // 1️⃣ GraphQL multipart spec: "operations" + "map" + binary file part
-    const operations = {
-      query: `
-        mutation addFile($file: File!) {
-          add_file_to_column(item_id: ${Number(jobId)}, column_id: "${columnId}", file: $file) {
-            id
+    form.append(
+      "operations",
+      JSON.stringify({
+        query: `
+          mutation ($file: File!) {
+            add_file_to_column (
+              item_id: ${Number(jobId)},
+              column_id: "${columnId}",
+              file: $file
+            ) { id }
           }
-        }
-      `,
-      variables: { file: null },
-    };
+        `,
+        variables: { file: null },
+      })
+    );
+    form.append("map", JSON.stringify({ "1": ["variables.file"] }));
+    form.append("1", buf, { filename: fileName, contentType: "image/jpeg" });
 
-    const map = { "0": ["variables.file"] };
-
-    form.append("operations", JSON.stringify(operations));
-    form.append("map", JSON.stringify(map));
-    form.append("0", buf, { filename: fileName, contentType: mime });
-
-    // 2️⃣ Send to Monday’s file endpoint
     const r = await fetch("https://api.monday.com/v2/file", {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${MONDAY_TOKEN}`,
-      },
-      body: form, // FormData auto-sets multipart boundaries
+      headers: { Authorization: `Bearer ${MONDAY_TOKEN}` },
+      body: form,
     });
 
     const j = await r.json();
 
-    // 3️⃣ Handle Monday response
     if (!r.ok || j.errors) {
       console.error("UPLOAD ERROR DETAIL:", j);
       return res.status(502).json({
@@ -736,7 +731,6 @@ app.post("/upload", async (req, res) => {
     return res.status(500).json({ ok: false, error: err.message });
   }
 });
-
 // ---------- server ----------
 const server = app.listen(Number(PORT), () => console.log("API running on :" + PORT));
 server.keepAliveTimeout = 65000;
