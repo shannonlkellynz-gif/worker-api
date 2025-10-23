@@ -670,65 +670,89 @@ app.post("/timesheets", async (req, res) => {
   }
 });
 
-// ---------- upload (legacy monday style: query + variables[file]) ----------
-app.post("/upload", async (req, res) => {
+// ---------- upload (new bulletproof version) ----------
+const multer = require("multer");
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024 }, // 20 MB cap
+});
+
+app.post("/upload", upload.single("file"), async (req, res) => {
+  const start = Date.now();
   try {
-    const {
-      jobId,
-      columnId = "file_mkvr42v",            // your Progress / Completed Photos column
-      fileName = "photo.jpg",
-      base64,
-      mime = "image/jpeg",
-    } = req.body || {};
+    const { itemId, columnId } = req.body || {};
+    if (!itemId || !columnId)
+      return res.status(400).json({ ok: false, code: "E_BAD_INPUT", msg: "Missing itemId/columnId" });
+    if (!req.file)
+      return res.status(400).json({ ok: false, code: "E_NO_FILE", msg: "No file received (multer)" });
 
-    if (!jobId) return res.status(400).json({ ok: false, error: "jobId required" });
-    if (!base64) return res.status(400).json({ ok: false, error: "base64 required" });
-
-    // strip a data URI prefix if the client sends one
-    const cleanB64 = base64.replace(/^data:[^;]+;base64,/, "");
-    const buf = Buffer.from(cleanB64, "base64");
+    const operations = JSON.stringify({
+      query: `
+        mutation ($file: File!, $item_id: Int!, $column_id: String!) {
+          add_file_to_column(file: $file, item_id: $item_id, column_id: $column_id) { id }
+        }`,
+      variables: { file: null, item_id: Number(itemId), column_id: columnId },
+    });
+    const map = JSON.stringify({ "0": ["variables.file"] });
 
     const form = new FormData();
-    const gql = `
-      mutation ($file: File!) {
-        add_file_to_column(
-          item_id: ${Number(jobId)},
-          column_id: "${columnId}",
-          file: $file
-        ) { id }
-      }
-    `.trim();
-
-    // This is the older pattern Monday accepts:
-    form.append("query", gql);
-    form.append("variables[file]", buf, { filename: fileName, contentType: mime });
-
-    const resp = await fetch(MONDAY_FILE_API, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${MONDAY_TOKEN}`,
-        ...form.getHeaders(),
-      },
-      body: form,
+    form.append("operations", operations);
+    form.append("map", map);
+    form.append("0", req.file.buffer, {
+      filename: req.file.originalname || "photo.jpg",
+      contentType: req.file.mimetype || "image/jpeg",
+      knownLength: req.file.size,
     });
 
-    const text = await resp.text();
-    let data;
-    try { data = JSON.parse(text); } catch { data = null; }
+    const MONDAY_FILE_API = "https://api.monday.com/v2/file";
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 60000); // 60 s timeout
 
-    if (!resp.ok || data?.errors) {
-      console.error("UPLOAD ERROR DETAIL:", data || text);
+    const r = await fetch(MONDAY_FILE_API, {
+      method: "POST",
+      headers: { Authorization: process.env.MONDAY_TOKEN },
+      body: form,
+      signal: ac.signal,
+    }).catch((e) => {
+      throw new Error("E_MONDAY_FETCH:" + e.message);
+    });
+    clearTimeout(timer);
+
+    const text = await r.text();
+    let json;
+    try { json = JSON.parse(text); } catch {}
+
+    if (!r.ok || (json && json.errors)) {
       return res.status(502).json({
         ok: false,
-        error: data?.error_message || data?.errors?.[0]?.message || "Upload failed",
+        code: "E_MONDAY_GRAPHQL",
+        status: r.status,
+        errors: (json && json.errors) || text,
       });
     }
 
-    return res.json({ ok: true, id: data?.data?.add_file_to_column?.id ?? null });
-  } catch (e) {
-    console.error("ERROR /upload:", e);
-    return res.status(500).json({ ok: false, error: e?.message || "Server error" });
+    res.json({
+      ok: true,
+      took_ms: Date.now() - start,
+      result: json || text,
+      file_bytes: req.file.size,
+    });
+  } catch (err) {
+    const msg = String(err);
+    let code = "E_UNKNOWN";
+    if (msg.includes("E_MONDAY_FETCH")) code = "E_MONDAY_FETCH";
+    if (msg.includes("aborted")) code = "E_TIMEOUT";
+    if (msg.includes("too large") || msg.includes("LIMIT_FILE_SIZE")) code = "E_FILE_TOO_LARGE";
+    res.status(500).json({ ok: false, code, msg });
   }
+});
+
+// Global multer error handler
+app.use((err, req, res, next) => {
+  if (err && err.code === "LIMIT_FILE_SIZE") {
+    return res.status(413).json({ ok: false, code: "E_FILE_TOO_LARGE", msg: "File exceeds 20 MB" });
+  }
+  next(err);
 });
 // ---------- server ----------
 const server = app.listen(Number(PORT), () => console.log("API running on :" + PORT));
