@@ -670,61 +670,61 @@ app.post("/timesheets", async (req, res) => {
   }
 });
 
-// ---------- upload (Monday official format) ----------
+/ ---------- upload (GraphQL multipart: operations + map + file) ----------
 app.post("/upload", async (req, res) => {
   try {
-    const { jobId, columnId = "file_mkvr42v", fileName = "photo.jpg", base64 } = req.body || {};
-    if (!jobId) return res.status(400).json({ ok: false, error: "jobId required" });
-    if (!base64) return res.status(400).json({ ok: false, error: "base64 required" });
+    let {
+      jobId,
+      columnId = "file_mkvr42v", // <-- your target column
+      fileName = "photo.jpg",
+      base64,
+      mime = "image/jpeg",
+    } = req.body || {};
 
-    const cleanBase64 = base64.replace(/^data:image\/\w+;base64,/, "");
-    const fileBuffer = Buffer.from(cleanBase64, "base64");
+    if (!jobId) return res.status(400).json({ error: "jobId required" });
+    if (!base64) return res.status(400).json({ error: "base64 required" });
+
+    // allow data URL; strip prefix if present
+    const data = base64.replace(/^data:[^;]+;base64,/, "");
+    const buf = Buffer.from(data, "base64");
 
     const form = new FormData();
 
-    // Official working GraphQL format
-    const operations = JSON.stringify({
-      query:
-        "mutation addFile($file: File!) { add_file_to_column (item_id: " +
-        Number(jobId) +
-        ', column_id: "' +
-        columnId +
-        '", file: $file) { id } }',
+    // GraphQL multipart spec
+    const operations = {
+      query: `
+        mutation ($file: File!) {
+          add_file_to_column (item_id: ${Number(jobId)}, column_id: "${columnId}", file: $file) {
+            id
+          }
+        }
+      `,
       variables: { file: null },
-    });
+    };
 
-    const map = JSON.stringify({ "0": ["variables.file"] });
+    const map = { "0": ["variables.file"] };
 
-    form.append("operations", operations);
-    form.append("map", map);
-    form.append("0", fileBuffer, { filename: fileName, contentType: "image/jpeg" });
+    form.append("operations", JSON.stringify(operations));
+    form.append("map", JSON.stringify(map));
+    form.append("0", buf, { filename: fileName, contentType: mime });
 
-    const uploadRes = await fetch("https://api.monday.com/v2/file", {
+    const r = await fetch(MONDAY_FILE_API, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${process.env.MONDAY_TOKEN}`,
-        ...form.getHeaders(),
-      },
-      body: form,
+      headers: { Authorization: `Bearer ${MONDAY_TOKEN}` },
+      body: form, // do NOT set Content-Type manually
     });
 
-    const resultText = await uploadRes.text();
-    let result;
-    try {
-      result = JSON.parse(resultText);
-    } catch {
-      result = { raw: resultText };
+    const j = await r.json();
+    if (!r.ok || j.errors) {
+      console.error("UPLOAD ERROR DETAIL:", j);
+      return res.status(502).json({ error: j?.error_message || "Upload failed", details: j });
     }
 
-    if (!uploadRes.ok || result?.errors) {
-      console.error("UPLOAD ERROR DETAIL:", result);
-      throw new Error(JSON.stringify(result?.errors || result));
-    }
-
-    res.json({ ok: true, result });
+    const id = j?.data?.add_file_to_column?.id || null;
+    return res.json({ ok: true, id });
   } catch (e) {
     console.error("ERROR /upload:", e);
-    res.status(500).json({ ok: false, error: e?.message || String(e) });
+    return res.status(500).json({ error: e?.message || "Server error" });
   }
 });
 
