@@ -1,14 +1,57 @@
-// index.js — Monday.com proxy server (CommonJS; updated with auth + timesheets)
+// index.js — Monday.com proxy server (fast cache + loose timesheets + debug)
 const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
 const FormData = require("form-data");
+const compression = require("compression");
 
 dotenv.config();
 
 const app = express();
+app.disable("x-powered-by");
+
+// ✅ Enable CORS first
 app.use(cors());
+
+// ✅ Enable gzip compression early
+app.use(compression({ level: 6 }));
+
+// ✅ Then handle JSON bodies
 app.use(express.json({ limit: "10mb" }));
+
+// ---------- tiny timing logger ----------
+app.use((req, res, next) => {
+  const t0 = Date.now();
+  res.on("finish", () => {
+    const ms = Date.now() - t0;
+    console.log(`➡️  ${req.method} ${req.originalUrl} -> ${res.statusCode} in ${ms}ms`);
+  });
+  next();
+});
+
+// ---------- simple in-memory cache (TTL seconds) ----------
+const CACHE_TTL_SECONDS = 300;
+const _cache = new Map(); // key -> { expires:number, data:any, size:number }
+function cacheGet(key) {
+  const v = _cache.get(key);
+  if (!v) return null;
+  if (Date.now() > v.expires) {
+    _cache.delete(key);
+    return null;
+  }
+  return v.data;
+}
+function cacheSet(key, data, ttl = CACHE_TTL_SECONDS) {
+  const size = typeof data === "string" ? data.length : JSON.stringify(data).length;
+  _cache.set(key, { data, expires: Date.now() + ttl * 1000, size });
+}
+function cacheKeys() {
+  const out = [];
+  for (const [k, v] of _cache.entries()) {
+    out.push({ key: k, ttl_ms: Math.max(0, v.expires - Date.now()), size: v.size });
+  }
+  return out.sort((a, b) => b.ttl_ms - a.ttl_ms);
+}
 
 const MONDAY_API = "https://api.monday.com/v2";
 const MONDAY_FILE_API = "https://api.monday.com/v2/file";
@@ -16,71 +59,72 @@ const MONDAY_FILE_API = "https://api.monday.com/v2/file";
 const {
   PORT = "4000",
   MONDAY_TOKEN,
-  // Contractors board (top-level)
+
+  // Contractors board
   CONTRACTORS_BOARD_ID,
   CONTRACTORS_EMAIL_COLUMN_ID,
-  // NEW: App PIN text column id on Contractors board
   CONTRACTORS_PIN_TEXT_COLUMN_ID,
 
-  // Jobs board (top-level) + address column on parent item
+  // Jobs board
   JOBS_BOARD_ID,
   JOBS_ADDRESS_COLUMN_ID,
 
-  // Subitem columns
+  // Subitems
   SUBITEMS_CONTRACTOR_COLUMN_ID,
   SUBITEMS_TIMELINE_COLUMN_ID,
   SUBITEMS_JOBNUMBER_COLUMN_ID,
   SUBITEMS_DESCRIPTION_COLUMN_ID,
   SUBITEMS_EMAIL_COLUMN_ID,
-
-  // Comma-separated subitem file columns to expose (e.g. file_mkq27jjz,file_mkvr42v,file_mkty6ysc)
   SUBITEMS_FILE_COLUMN_IDS,
 
-  // Timesheet board + columns
+  // Timesheets
   TIMESHEETS_BOARD_ID,
   TS_DATE_COLUMN_ID,
   TS_NAME_COLUMN_ID,
   TS_START_NUM_COLUMN_ID,
   TS_FINISH_NUM_COLUMN_ID,
-  // Prefer text Yes/No for lunch
-  TS_LUNCH_TEXT_COLUMN_ID, // e.g., text_mkvrjn0s  (value "Yes" or "No")
-  // Optional legacy dropdown id (not recommended)
-  TS_LUNCH_BOOL_DROPDOWN_ID, // if used, labels must be {1: Yes, 0: No}
+  TS_LUNCH_TEXT_COLUMN_ID,
   TS_JOBNUMBER_TEXT_COLUMN_ID,
   TS_TOTAL_HOURS_NUM_COLUMN_ID,
   TS_NOTES_LONGTEXT_COLUMN_ID,
-  TS_JOB_COMPLETE_TEXT_COLUMN_ID, // e.g., text_mkvrwc2e  (value "Yes"/"No")
-  TS_PHOTOS_FILE_COLUMN_ID, // (not used on create currently)
+  TS_JOB_COMPLETE_TEXT_COLUMN_ID,
+  TS_PHOTOS_FILE_COLUMN_ID,
 } = process.env;
 
-// ---------------- Core Monday helper ----------------
+// ---------- Monday helper (with caching for idempotent queries) ----------
 async function monday(query, variables = {}, isFile = false, form) {
-  if (isFile && form) {
-    const r = await fetch(MONDAY_FILE_API, {
+  const keyBase = isFile ? null : `m:${Buffer.from(query + "::" + JSON.stringify(variables)).toString("base64")}`;
+  if (!isFile) {
+    const hit = cacheGet(keyBase);
+    if (hit) return hit;
+  }
+  try {
+    if (isFile && form) {
+      const r = await fetch(MONDAY_FILE_API, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${MONDAY_TOKEN}` },
+        body: form,
+      });
+      const j = await r.json();
+      if (j.errors) throw new Error(JSON.stringify(j.errors));
+      return j;
+    }
+    const r = await fetch(MONDAY_API, {
       method: "POST",
-      headers: { Authorization: `Bearer ${MONDAY_TOKEN}` },
-      body: form,
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${MONDAY_TOKEN}` },
+      body: JSON.stringify({ query, variables }),
     });
     const j = await r.json();
     if (j.errors) throw new Error(JSON.stringify(j.errors));
-    return j;
+    if (!isFile) cacheSet(keyBase, j.data);
+    return j.data;
+  } catch (err) {
+    console.error("monday() error:", err?.message || err);
+    throw err;
   }
-  const r = await fetch(MONDAY_API, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${MONDAY_TOKEN}`,
-    },
-    body: JSON.stringify({ query, variables }),
-  });
-  const j = await r.json();
-  if (j.errors) throw new Error(JSON.stringify(j.errors));
-  return j.data;
 }
 
-app.get("/health", (_req, res) => res.json({ ok: true }));
-
-// ---------------- Helpers ----------------
+// ---------- helpers ----------
 function parseConnectIds(value) {
   if (!value) return [];
   try {
@@ -97,45 +141,82 @@ function getFileColumnIds() {
     .map((s) => s.trim())
     .filter(Boolean);
 }
-async function resolveAssets(assetIds = []) {
-  const unique = Array.from(new Set(assetIds.map(String))).filter(Boolean);
-  if (unique.length === 0) return {};
-  const q = `
-    query($ids: [ID!]!) {
-      assets(ids: $ids) {
-        id
-        url
-        public_url
-        name
-        file_extension
-      }
-    }`;
-  const d = await monday(q, { ids: unique });
-  const out = {};
-  for (const a of d?.assets || []) {
-    out[String(a.id)] = {
-      url: a.url || null,
-      public_url: a.public_url || null,
-      name: a.name || "",
-      ext: a.file_extension || "",
-    };
-  }
-  return out;
-}
-const pad2 = (n) => (n < 10 ? `0${n}` : String(n));
-const to4 = (nOrStr) => {
+function to4(nOrStr) {
   const s = String(nOrStr ?? "").replace(/\D/g, "");
-  if (!s) return "";
-  return s.padStart(4, "0").slice(0, 4);
-};
+  return s ? s.padStart(4, "0").slice(0, 4) : "";
+}
+const norm = (s) => String(s || "").toLowerCase().replace(/\s+/g, " ").trim();
 
-// ---------------- AUTH ----------------
-// POST /auth/login — verify email + 4-digit PIN against Contractors board
+// ---------- debug ----------
+app.get("/debug/ping", (_req, res) => res.json({ ok: true, t: Date.now() }));
+app.get("/debug/env", (_req, res) => {
+  const safe = {
+    PORT,
+    CONTRACTORS_BOARD_ID,
+    CONTRACTORS_EMAIL_COLUMN_ID,
+    CONTRACTORS_PIN_TEXT_COLUMN_ID,
+    JOBS_BOARD_ID,
+    JOBS_ADDRESS_COLUMN_ID,
+    SUBITEMS_CONTRACTOR_COLUMN_ID,
+    SUBITEMS_TIMELINE_COLUMN_ID,
+    SUBITEMS_JOBNUMBER_COLUMN_ID,
+    SUBITEMS_DESCRIPTION_COLUMN_ID,
+    SUBITEMS_EMAIL_COLUMN_ID,
+    SUBITEMS_FILE_COLUMN_IDS,
+    TIMESHEETS_BOARD_ID,
+    TS_DATE_COLUMN_ID,
+    TS_NAME_COLUMN_ID,
+    TS_START_NUM_COLUMN_ID,
+    TS_FINISH_NUM_COLUMN_ID,
+    TS_LUNCH_TEXT_COLUMN_ID,
+    TS_JOBNUMBER_TEXT_COLUMN_ID,
+    TS_TOTAL_HOURS_NUM_COLUMN_ID,
+    TS_NOTES_LONGTEXT_COLUMN_ID,
+    TS_JOB_COMPLETE_TEXT_COLUMN_ID,
+    TS_PHOTOS_FILE_COLUMN_ID,
+  };
+  res.json(safe);
+});
+app.get("/debug/cache", (_req, res) => res.json({ keys: cacheKeys() }));
+
+// quick sampler to see real stored names on the timesheets board
+app.get("/debug/timesheets-sample", async (_req, res) => {
+  try {
+    const q = `
+      query($boardId:ID!, $cursor:String, $colIds:[String!]!) {
+        boards(ids: [$boardId]) {
+          items_page(limit: 100, cursor: $cursor) {
+            cursor
+            items { id name column_values(ids:$colIds){ id text } }
+          }
+        }
+      }`;
+    const colIds = [TS_NAME_COLUMN_ID].filter(Boolean);
+    let cursor = null, out = [];
+    do {
+      const d = await monday(q, { boardId: TIMESHEETS_BOARD_ID, cursor, colIds });
+      const page = d?.boards?.[0]?.items_page;
+      cursor = page?.cursor || null;
+      for (const it of page?.items || []) {
+        const nameCv = (it.column_values || []).find((c) => c.id === TS_NAME_COLUMN_ID);
+        out.push({ id: it.id, tsName: nameCv?.text || "", itemName: it.name });
+        if (out.length >= 100) { cursor = null; break; }
+      }
+    } while (cursor);
+    res.json({ count: out.length, sample: out });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---------- health ----------
+app.get("/health", (_req, res) => res.json({ ok: true, t: Date.now() }));
+
+// ---------- auth ----------
 app.post("/auth/login", async (req, res) => {
   try {
     const email = String(req.body?.email || "").trim().toLowerCase();
     const pinRaw = String(req.body?.pin || "").trim();
-
     if (!email || !/^\S+@\S+\.\S+$/.test(email) || !/^\d{4}$/.test(pinRaw)) {
       return res.status(400).json({ ok: false, error: "Invalid email or PIN format." });
     }
@@ -145,235 +226,208 @@ app.post("/auth/login", async (req, res) => {
         boards(ids: [$boardId]) {
           items_page(limit: 100, cursor: $cursor) {
             cursor
-            items {
-              id
-              name
-              column_values { id text value }
-            }
+            items { id name column_values { id text } }
           }
         }
       }`;
-
-    let cursor = null;
-    let contractor = null;
-
+    let cursor = null, contractor = null;
     do {
       const d = await monday(q, { boardId: CONTRACTORS_BOARD_ID, cursor });
       const page = d?.boards?.[0]?.items_page;
       cursor = page?.cursor || null;
-
       for (const it of page?.items || []) {
-        const match = (it.column_values || []).some(
-          (cv) =>
-            cv.id === CONTRACTORS_EMAIL_COLUMN_ID &&
-            String(cv.text || "").trim().toLowerCase() === email
+        const match = it.column_values?.some(
+          (cv) => cv.id === CONTRACTORS_EMAIL_COLUMN_ID && String(cv.text || "").trim().toLowerCase() === email
         );
-        if (match) {
-          contractor = it;
-          break;
-        }
+        if (match) { contractor = it; break; }
       }
     } while (!contractor && cursor);
 
-    if (!contractor) {
-      return res.status(401).json({ ok: false, error: "Invalid email or PIN." });
-    }
-
-    // Preferred text column for PIN
+    if (!contractor) return res.status(401).json({ ok: false, error: "Invalid email or PIN" });
     const cvs = contractor.column_values || [];
-    let storedText = "";
+    let storedPin = "";
     if (CONTRACTORS_PIN_TEXT_COLUMN_ID) {
       const pinCv = cvs.find((cv) => cv.id === CONTRACTORS_PIN_TEXT_COLUMN_ID);
-      storedText = String(pinCv?.text || "").trim();
+      storedPin = String(pinCv?.text || "").trim();
     }
-    // Fallback: any 4-digit text on row
-    if (!/^\d{4}$/.test(storedText)) {
-      const guess = cvs
-        .map((cv) => String(cv?.text || "").trim())
-        .find((t) => /^\d{4}$/.test(t));
-      if (guess) storedText = guess;
-    }
-    let normalizedStored = storedText.replace(/\D/g, "");
-    if (normalizedStored.length > 0 && normalizedStored.length < 4) {
-      normalizedStored = normalizedStored.padStart(4, "0");
-    }
+    const normalized = storedPin.replace(/\D/g, "").padStart(4, "0");
+    if (normalized !== pinRaw) return res.status(401).json({ ok: false, error: "Invalid email or PIN" });
 
-    if (normalizedStored !== pinRaw) {
-      return res.status(401).json({ ok: false, error: "Invalid email or PIN." });
-    }
-
-    return res.json({ ok: true, name: contractor.name || "" });
+    res.json({ ok: true, name: contractor.name || "" });
   } catch (e) {
     console.error("ERROR /auth/login:", e);
-    return res.status(500).json({ ok: false, error: "Server error." });
+    res.status(500).json({ ok: false, error: e.message });
   }
 });
 
-// ---------------- JOBS ----------------
-
-// GET /jobs/my?email=... [&on=YYYY-MM-DD&includeWeekends=0]
+// ---------- jobs (cached) ----------
 app.get("/jobs/my", async (req, res) => {
   try {
     const email = String(req.query.email || "").trim().toLowerCase();
-    if (!email) return res.status(400).json({ error: "email query required" });
+    if (!email) return res.status(400).json({ error: "email required" });
 
-    const onDate = String(req.query.on || "").trim(); // optional YYYY-MM-DD
+    const onDate = String(req.query.on || "");
     const includeWeekends = String(req.query.includeWeekends || "1") !== "0";
+    const page = Math.max(1, parseInt(String(req.query.page || "1"), 10));
+    const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit || "50"), 10)));
+    const offset = (page - 1) * limit;
+
+    const cacheKey = `jobs:${email}:${onDate}:${includeWeekends}:${page}:${limit}`;
+    const hit = cacheGet(cacheKey);
+    if (hit) return res.json(hit);
 
     const isWeekend = (iso) => {
+      if (!iso) return false;
       const dt = new Date(`${iso}T12:00:00Z`);
       const dow = dt.getUTCDay();
       return dow === 0 || dow === 6;
     };
 
-    // 1) Fetch contractors (paged)
-    const contractorsQ = `
-      query($boardId:ID!, $cursor:String) {
+    // find contractor id
+    const contractorQ = `
+      query($boardId:ID!, $cursor:String){
         boards(ids: [$boardId]) {
-          items_page(limit: 100, cursor: $cursor) {
-            cursor
-            items { id name column_values { id text value } }
+          items_page(limit: 100, cursor:$cursor){
+            cursor items{ id column_values{id text} }
           }
         }
       }`;
-    let cCursor = null;
-    let contractors = [];
+    let cCursor = null, contractorId = null;
     do {
-      const d = await monday(contractorsQ, {
-        boardId: CONTRACTORS_BOARD_ID,
-        cursor: cCursor,
-      });
-      const page = d.boards[0].items_page;
-      contractors = contractors.concat(page.items);
-      cCursor = page.cursor || null;
-    } while (cCursor);
+      const d = await monday(contractorQ, { boardId: CONTRACTORS_BOARD_ID, cursor: cCursor });
+      const pageChunk = d?.boards?.[0]?.items_page;
+      cCursor = pageChunk?.cursor || null;
+      for (const it of pageChunk?.items || []) {
+        const match = it.column_values?.some(
+          (cv) => cv.id === CONTRACTORS_EMAIL_COLUMN_ID && String(cv.text || "").trim().toLowerCase() === email
+        );
+        if (match) { contractorId = String(it.id); break; }
+      }
+    } while (!contractorId && cCursor);
+    if (!contractorId) {
+      const out = { items: [], total: 0, page, limit };
+      cacheSet(cacheKey, out);
+      return res.json(out);
+    }
 
-    const contractor = contractors.find((it) =>
-      it.column_values?.some(
-        (cv) =>
-          cv.id === CONTRACTORS_EMAIL_COLUMN_ID &&
-          String(cv.text || "").trim().toLowerCase() === email
-      )
-    );
-    if (!contractor) return res.json({ items: [] });
-    const contractorId = String(contractor.id);
+    const subCols = [
+      SUBITEMS_CONTRACTOR_COLUMN_ID,
+      SUBITEMS_TIMELINE_COLUMN_ID,
+      SUBITEMS_JOBNUMBER_COLUMN_ID,
+      SUBITEMS_DESCRIPTION_COLUMN_ID,
+      SUBITEMS_EMAIL_COLUMN_ID,
+    ].filter(Boolean);
+    const addrCols = [JOBS_ADDRESS_COLUMN_ID].filter(Boolean);
 
-    // 2) Fetch jobs + subitems (paged)
     const jobsQ = `
-      query($boardId:ID!, $cursor:String) {
+      query($boardId:ID!, $cursor:String, $addrCols:[String!], $subCols:[String!]) {
         boards(ids: [$boardId]) {
-          items_page(limit: 50, cursor: $cursor) {
+          items_page(limit:50, cursor:$cursor){
             cursor
-            items {
-              id
-              name
-              column_values { id text value }
-              subitems {
-                id
-                name
-                column_values { id text value }
+            items{
+              id name
+              column_values(ids:$addrCols){id text}
+              subitems{
+                id name
+                column_values(ids:$subCols){id text value}
               }
             }
           }
         }
       }`;
-    let jCursor = null;
-    const results = [];
-    do {
-      const d = await monday(jobsQ, { boardId: JOBS_BOARD_ID, cursor: jCursor });
-      const page = d.boards[0].items_page;
-      jCursor = page.cursor || null;
 
-      for (const job of page.items) {
-        const jobCols = Object.fromEntries((job.column_values || []).map((cv) => [cv.id, cv]));
-        const address = jobCols[JOBS_ADDRESS_COLUMN_ID]?.text || "";
+    let jCursor = null, totalPossible = 0, collected = 0;
+    const results = [];
+
+    loopPages:
+    do {
+      const d = await monday(jobsQ, { boardId: JOBS_BOARD_ID, cursor: jCursor, addrCols, subCols });
+      const pageChunk = d?.boards?.[0]?.items_page;
+      jCursor = pageChunk?.cursor || null;
+
+      for (const job of pageChunk?.items || []) {
+        const address = job.column_values?.[0]?.text || "";
 
         for (const s of job.subitems || []) {
           const sCols = Object.fromEntries((s.column_values || []).map((cv) => [cv.id, cv]));
-          // match by linked contractor or subitem email
           const linkedIds = parseConnectIds(sCols[SUBITEMS_CONTRACTOR_COLUMN_ID]?.value);
-          const matchByLink = linkedIds.includes(contractorId);
-          const subEmailColId = SUBITEMS_EMAIL_COLUMN_ID;
-          const subEmailText = subEmailColId ? (sCols[subEmailColId]?.text || "").trim().toLowerCase() : "";
-          const matchByEmail = subEmailColId ? subEmailText === email : false;
+          const matchByLink = linkedIds.includes(String(contractorId));
+          const matchByEmail = SUBITEMS_EMAIL_COLUMN_ID
+            ? (sCols[SUBITEMS_EMAIL_COLUMN_ID]?.text || "").trim().toLowerCase() === email
+            : false;
           if (!(matchByLink || matchByEmail)) continue;
 
-          const jobNumber = sCols[SUBITEMS_JOBNUMBER_COLUMN_ID]?.text || "";
-          const description = sCols[SUBITEMS_DESCRIPTION_COLUMN_ID]?.text || "";
-
           let startDate = "", endDate = "";
-          const tlVal = sCols[SUBITEMS_TIMELINE_COLUMN_ID]?.value;
-          if (tlVal) {
-            try {
-              const tl = JSON.parse(tlVal);
-              startDate = tl.from || "";
-              endDate = tl.to || tl.from || "";
-            } catch {}
-          }
-
-          const row = {
-            parentJobId: job.id,
-            parentJobName: job.name,
-            address,
-            subitemId: s.id,
-            subitemName: s.name,
-            jobNumber,
-            description,
-            timeline: { startDate, endDate },
-          };
-
-          // If /jobs/my?on=YYYY-MM-DD and excluding weekends, filter here
-          if (onDate) {
-            if (!includeWeekends && isWeekend(onDate)) {
-              // skip weekend dates entirely
-            } else {
-              const sISO = startDate || "";
-              const eISO = endDate || sISO;
-              if (onDate >= sISO && onDate <= eISO) {
-                results.push(row);
-              }
+          try {
+            const tlVal = sCols[SUBITEMS_TIMELINE_COLUMN_ID]?.value;
+            if (tlVal) {
+              const tl = typeof tlVal === "string" ? JSON.parse(tlVal) : tlVal;
+              startDate = tl?.from || "";
+              endDate = tl?.to || tl?.from || "";
             }
-          } else {
-            results.push(row);
+          } catch {}
+
+          if (onDate) {
+            if (!includeWeekends && isWeekend(onDate)) continue;
+            if (!(onDate >= startDate && onDate <= endDate)) continue;
           }
+
+          totalPossible++;
+          if (totalPossible > offset && collected < limit) {
+            results.push({
+              parentJobId: job.id,
+              parentJobName: job.name,
+              address,
+              subitemId: s.id,
+              subitemName: s.name,
+              jobNumber: sCols[SUBITEMS_JOBNUMBER_COLUMN_ID]?.text || "",
+              description: sCols[SUBITEMS_DESCRIPTION_COLUMN_ID]?.text || "",
+              timeline: { startDate, endDate },
+            });
+            collected++;
+          }
+          if (collected >= limit && totalPossible >= offset + limit) { jCursor = null; break loopPages; }
         }
       }
     } while (jCursor);
 
-    res.json({ items: results });
+    const out = { items: results, total: totalPossible, page, limit };
+    cacheSet(cacheKey, out);
+    res.json(out);
   } catch (e) {
     console.error("ERROR /jobs/my:", e);
     res.status(500).json({ error: e.message });
   }
 });
 
-// GET /jobs/:subitemId/details — returns filesByColumn + flat files list
+// ---------- job details (cached) ----------
 app.get("/jobs/:subitemId/details", async (req, res) => {
   const subitemId = String(req.params.subitemId);
   const fileColumnIds = getFileColumnIds();
+  const cacheKey = `jobDetails:${subitemId}:${fileColumnIds.join(",")}`;
+  const hit = cacheGet(cacheKey);
+  if (hit) return res.json(hit);
 
   try {
     const q = `
-      query($id: [ID!]) {
+      query($id: [ID!], $fileIds: [String!]!) {
         items(ids: $id) {
-          id
-          name
-          column_values { id text value }
+          id name updated_at created_at
+          column_values(ids: $fileIds) { id text value }
         }
       }`;
-    const d = await monday(q, { id: [subitemId] });
+    const d = await monday(q, { id: [subitemId], fileIds: fileColumnIds });
     const item = d?.items?.[0];
     if (!item) {
-      return res.json({ item: null, files: [], filesByColumn: {}, columnIds: fileColumnIds });
+      const out = { item: null, files: [], filesByColumn: {}, columnIds: fileColumnIds };
+      cacheSet(cacheKey, out);
+      return res.json(out);
     }
 
     const filesByColumn = {};
     const flat = [];
-    const allAssetIds = [];
 
-    const filtered = (item.column_values || []).filter((cv) => fileColumnIds.includes(cv.id));
-
-    for (const cv of filtered) {
+    for (const cv of (item.column_values || [])) {
       let files = [];
       if (cv?.value) {
         try {
@@ -381,42 +435,24 @@ app.get("/jobs/:subitemId/details", async (req, res) => {
           if (v && Array.isArray(v.files)) {
             files = v.files.map((f) => {
               const assetId = f?.assetId ? String(f.assetId) : null;
-              if (assetId) allAssetIds.push(assetId);
               const obj = { columnId: cv.id, name: String(f?.name ?? "file"), assetId, url: f?.url || null };
               flat.push(obj);
               return { name: obj.name, assetId: obj.assetId, url: obj.url };
             });
           }
-        } catch (err) {
-          console.warn("Parse file column failed:", cv.id, err?.message || err);
-        }
+        } catch {}
       }
       filesByColumn[cv.id] = files;
     }
 
-    // Resolve asset URLs where missing
-    let assets = {};
-    if (allAssetIds.length > 0) {
-      try {
-        assets = await resolveAssets(allAssetIds);
-      } catch (err) {
-        console.warn("resolveAssets error:", err?.message || err);
-      }
-    }
-
-    const enrichedFlat = flat.map((f) => {
-      if (!f.url && f.assetId && assets[f.assetId]) {
-        f.url = assets[f.assetId].public_url || assets[f.assetId].url || null;
-      }
-      return f;
-    });
-
-    res.json({
+    const out = {
       item: { id: item.id, name: item.name },
-      files: enrichedFlat,
+      files: flat,
       filesByColumn,
       columnIds: fileColumnIds,
-    });
+    };
+    cacheSet(cacheKey, out);
+    res.json(out);
   } catch (e) {
     console.error("ERROR /jobs/:subitemId/details:", e);
     res.json({
@@ -429,25 +465,26 @@ app.get("/jobs/:subitemId/details", async (req, res) => {
   }
 });
 
-// GET /files/:assetId — simple redirect to Monday file URL
+// ---------- files (cached asset lookups) ----------
 app.get("/files/:assetId", async (req, res) => {
   try {
     const assetId = String(req.params.assetId).trim();
-    const q = `
-      query($ids: [ID!]!) {
-        assets(ids: $ids) {
-          id
-          url
-          public_url
-          name
-          file_extension
-        }
-      }`;
+    const cacheKey = `asset:${assetId}`;
+    const hit = cacheGet(cacheKey);
+    if (hit) {
+      if (!hit.url && !hit.public_url) return res.status(404).send("No URL available for this file.");
+      res.set("Cache-Control", "private, max-age=120");
+      return res.redirect(hit.public_url || hit.url);
+    }
+
+    const q = `query($ids: [ID!]!) { assets(ids: $ids) { id url public_url name file_extension } }`;
     const d = await monday(q, { ids: [assetId] });
     const a = d?.assets?.[0];
+    cacheSet(cacheKey, a || {});
     if (!a || !(a.public_url || a.url)) {
       return res.status(404).send("No URL available for this file.");
     }
+    res.set("Cache-Control", "private, max-age=120");
     return res.redirect(a.public_url || a.url);
   } catch (e) {
     console.error("FILE PROXY fatal error:", e?.message || e);
@@ -455,14 +492,134 @@ app.get("/files/:assetId", async (req, res) => {
   }
 });
 
-// POST /upload — add a base64 image to a file column on a subitem
+// ---------- timesheets (optimized + 5min cache) ----------
+app.get("/timesheets", async (req, res) => {
+  try {
+    const nameRaw = String(req.query.name || "").trim();
+    const jobNumberFilter = String(req.query.jobNumber || "").trim();
+    const limit = Math.max(1, Math.min(200, Number(req.query.limit || 50)));
+    const strict = String(req.query.strict || "0") === "1";
+    const loose = String(req.query.loose || "1") === "1";
+    const wantDebug = String(req.query.debug || "0") === "1";
+
+    const cacheKey = `ts:${TIMESHEETS_BOARD_ID}:${nameRaw}:${jobNumberFilter}:${limit}:${strict}:${loose}`;
+    const hit = cacheGet(cacheKey);
+    if (hit) {
+      if (wantDebug) return res.json(hit);
+      const { sampleNames, ...clean } = hit;
+      return res.json(clean);
+    }
+
+    // only query columns we actually render in the app
+    const colIds = [
+      TS_DATE_COLUMN_ID,
+      TS_NAME_COLUMN_ID,
+      TS_START_NUM_COLUMN_ID,
+      TS_FINISH_NUM_COLUMN_ID,
+      TS_JOBNUMBER_TEXT_COLUMN_ID,
+      TS_TOTAL_HOURS_NUM_COLUMN_ID,
+      TS_NOTES_LONGTEXT_COLUMN_ID,
+    ].filter(Boolean);
+
+    const q = `
+      query($boardId:ID!, $cursor:String, $colIds:[String!]!) {
+        boards(ids: [$boardId]) {
+          items_page(limit: 100, cursor: $cursor) {
+            cursor
+            items {
+              id name updated_at created_at
+              group { title }
+              column_values(ids: $colIds) { id text value }
+            }
+          }
+        }
+      }`;
+
+    const wantName = norm(nameRaw);
+    let cursor = null;
+    const items = [];
+    const sampleNames = [];
+
+    do {
+      const d = await monday(q, { boardId: TIMESHEETS_BOARD_ID, cursor, colIds });
+      const page = d?.boards?.[0]?.items_page;
+      cursor = page?.cursor || null;
+
+      for (const it of page?.items || []) {
+        const cvs = Object.fromEntries((it.column_values || []).map(cv => [cv.id, cv]));
+        const worker = TS_NAME_COLUMN_ID ? cvs[TS_NAME_COLUMN_ID]?.text || "" : "";
+        if (sampleNames.length < 50) sampleNames.push(worker);
+
+        // filter by name (lenient by default)
+        if (wantName) {
+          const got = norm(worker);
+          const match = strict
+            ? got === wantName
+            : got === wantName || got.includes(wantName) || wantName.includes(got);
+          if (!match) continue;
+        }
+
+        const jobNo = TS_JOBNUMBER_TEXT_COLUMN_ID ? cvs[TS_JOBNUMBER_TEXT_COLUMN_ID]?.text || "" : "";
+        if (jobNumberFilter && jobNo.trim() !== jobNumberFilter) continue;
+
+        // parse date
+        let dateISO = "";
+        if (TS_DATE_COLUMN_ID) {
+          const val = cvs[TS_DATE_COLUMN_ID]?.value;
+          if (val) {
+            try {
+              const parsed = typeof val === "string" ? JSON.parse(val) : val;
+              dateISO = parsed?.date || "";
+            } catch {}
+          }
+        }
+
+        const start4 = to4(cvs[TS_START_NUM_COLUMN_ID]?.text || "");
+        const end4 = to4(cvs[TS_FINISH_NUM_COLUMN_ID]?.text || "");
+        const totalHours = Number((cvs[TS_TOTAL_HOURS_NUM_COLUMN_ID]?.text || "").replace(",", ".")) || 0;
+        const notes = cvs[TS_NOTES_LONGTEXT_COLUMN_ID]?.text || "";
+        const groupTitle = String(it.group?.title || "").toLowerCase();
+        const approved = groupTitle.includes("approved") || groupTitle.includes("payroll");
+
+        // only keep lightweight payload
+        items.push({
+          id: it.id,
+          dateISO,
+          start4,
+          end4,
+          totalHours,
+          jobNumber: jobNo,
+          workerName: worker,
+          notes,
+          status: approved ? "approved" : "pending",
+        });
+
+        if (items.length >= limit * 2) break; // prevent runaway pages
+      }
+    } while (cursor && items.length < limit * 2);
+
+    items.sort((a, b) => (a.dateISO > b.dateISO ? -1 : a.dateISO < b.dateISO ? 1 : 0));
+
+    const payload = { items: items.slice(0, limit), sampleNames };
+    cacheSet(cacheKey, payload, 300); // keep 5min
+
+    if (!wantDebug) {
+      const { sampleNames: _sn, ...clean } = payload;
+      return res.json(clean);
+    }
+    return res.json(payload);
+  } catch (e) {
+    console.error("ERROR GET /timesheets:", e);
+    res.status(500).json({ error: e.message });
+  }
+});// ---------- upload ----------
 app.post("/upload", async (req, res) => {
   try {
     const { jobId, columnId = "files", fileName = "photo.jpg", base64 } = req.body;
     if (!base64) return res.status(400).json({ error: "base64 required" });
 
     const buf = Buffer.from(base64, "base64");
-    const form = new FormData();
+    const form = new FormData();F
     const gql = `mutation ($file: File!) {
       add_file_to_column(item_id:${Number(jobId)}, column_id:"${columnId}", file:$file) { id }
     }`;
@@ -477,184 +634,7 @@ app.post("/upload", async (req, res) => {
   }
 });
 
-// ---------------- TIMESHEETS ----------------
-
-// Helper: find a group id by (partial) title, fallback to first group.
-async function findGroupId(boardId, titleIncludes /* string, case-insensitive */) {
-  const q = `
-    query($id: [ID!]) {
-      boards(ids: $id) {
-        groups { id title }
-      }
-    }`;
-  const d = await monday(q, { id: [boardId] });
-  const groups = d?.boards?.[0]?.groups || [];
-  const match = groups.find((g) => String(g.title || "").toLowerCase().includes(String(titleIncludes).toLowerCase()));
-  return match ? match.id : (groups[0]?.id || null);
-}
-
-// POST /timesheets — create item in "To be Approved" (or fallback group)
-app.post("/timesheets", async (req, res) => {
-  try {
-    const {
-      email,
-      workerName,
-      jobNumber,
-      date, // ISO yyyy-mm-dd
-      startNum,
-      endNum,
-      tookLunch,
-      totalHours,
-      jobComplete,
-      notes,
-    } = req.body || {};
-
-    if (!TIMESHEETS_BOARD_ID) {
-      return res.status(400).json({ error: "TIMESHEETS_BOARD_ID not set" });
-    }
-
-    // Resolve group
-    const groupId = await findGroupId(TIMESHEETS_BOARD_ID, "to be approved");
-
-    // Build column values object
-    const col = {};
-
-    if (TS_NAME_COLUMN_ID && workerName) col[TS_NAME_COLUMN_ID] = String(workerName);
-    if (TS_JOBNUMBER_TEXT_COLUMN_ID && jobNumber) col[TS_JOBNUMBER_TEXT_COLUMN_ID] = String(jobNumber);
-
-    if (TS_DATE_COLUMN_ID && date) col[TS_DATE_COLUMN_ID] = { date: String(date) };
-
-    if (TS_START_NUM_COLUMN_ID && (startNum || startNum === 0)) col[TS_START_NUM_COLUMN_ID] = String(startNum);
-    if (TS_FINISH_NUM_COLUMN_ID && (endNum || endNum === 0)) col[TS_FINISH_NUM_COLUMN_ID] = String(endNum);
-
-    // Lunch (prefer text Yes/No)
-    if (TS_LUNCH_TEXT_COLUMN_ID) {
-      col[TS_LUNCH_TEXT_COLUMN_ID] = tookLunch ? "Yes" : "No";
-    } else if (TS_LUNCH_BOOL_DROPDOWN_ID) {
-      // Dropdown expects label indexes. We'll use 1 for Yes, 0 for No.
-      col[TS_LUNCH_BOOL_DROPDOWN_ID] = { labels: [tookLunch ? "Yes" : "No"] };
-    }
-
-    if (TS_TOTAL_HOURS_NUM_COLUMN_ID && (totalHours || totalHours === 0)) col[TS_TOTAL_HOURS_NUM_COLUMN_ID] = String(totalHours);
-
-    if (TS_NOTES_LONGTEXT_COLUMN_ID && notes != null) col[TS_NOTES_LONGTEXT_COLUMN_ID] = String(notes);
-
-    if (TS_JOB_COMPLETE_TEXT_COLUMN_ID) col[TS_JOB_COMPLETE_TEXT_COLUMN_ID] = jobComplete ? "Yes" : "No";
-
-    const itemName = `${jobNumber || "Timesheet"} — ${date || ""}`;
-
-    const mutation = `
-      mutation CreateTS($boardId: ID!, $groupId: String, $itemName: String!, $columnVals: JSON!) {
-        create_item(board_id: $boardId, group_id: $groupId, item_name: $itemName, column_values: $columnVals) { id }
-      }`;
-    const variables = {
-      boardId: Number(TIMESHEETS_BOARD_ID),
-      groupId,
-      itemName,
-      columnVals: JSON.stringify(col),
-    };
-    const r = await monday(mutation, variables);
-    res.json({ ok: true, id: r?.create_item?.id || null });
-  } catch (e) {
-    console.error("ERROR /timesheets:", e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// GET /timesheets?name=John%20Smith&jobNumber=2688-2&limit=50
-app.get("/timesheets", async (req, res) => {
-  try {
-    const name = String(req.query.name || "").trim();
-    const jobNumberFilter = String(req.query.jobNumber || "").trim();
-    const limit = Math.max(1, Math.min(200, Number(req.query.limit || 50)));
-
-    const q = `
-      query($boardId:ID!, $cursor:String) {
-        boards(ids: [$boardId]) {
-          items_page(limit: 100, cursor: $cursor) {
-            cursor
-            items {
-              id
-              name
-              group { id title }
-              column_values { id text value }
-            }
-          }
-        }
-      }`;
-    let cursor = null;
-    const all = [];
-
-    do {
-      const d = await monday(q, { boardId: TIMESHEETS_BOARD_ID, cursor });
-      const page = d?.boards?.[0]?.items_page;
-      cursor = page?.cursor || null;
-
-      for (const it of page?.items || []) {
-        const cvs = Object.fromEntries((it.column_values || []).map((cv) => [cv.id, cv]));
-
-        const workerNameText = TS_NAME_COLUMN_ID ? (cvs[TS_NAME_COLUMN_ID]?.text || "") : "";
-        if (name && workerNameText && workerNameText.trim() !== name) continue;
-
-        const jobNumberText = TS_JOBNUMBER_TEXT_COLUMN_ID ? (cvs[TS_JOBNUMBER_TEXT_COLUMN_ID]?.text || "") : "";
-        if (jobNumberFilter && jobNumberText.trim() !== jobNumberFilter) continue;
-
-        // date ISO
-        let dateISO = "";
-        if (TS_DATE_COLUMN_ID) {
-          const v = cvs[TS_DATE_COLUMN_ID]?.value;
-          if (v) {
-            try {
-              const parsed = typeof v === "string" ? JSON.parse(v) : v;
-              dateISO = parsed?.date || "";
-            } catch {}
-          }
-        }
-
-        // start/end as 4-digit strings
-        const start4 = to4(cvs[TS_START_NUM_COLUMN_ID]?.text || "");
-        const end4 = to4(cvs[TS_FINISH_NUM_COLUMN_ID]?.text || "");
-
-        // total hours
-        const totalHours = Number((cvs[TS_TOTAL_HOURS_NUM_COLUMN_ID]?.text || "").replace(",", ".")) || 0;
-
-        // notes
-        const notes = cvs[TS_NOTES_LONGTEXT_COLUMN_ID]?.text || "";
-
-        // status by group title
-        const groupTitle = String(it.group?.title || "").toLowerCase();
-        const approved = groupTitle.includes("approved - upcoming payroll") || groupTitle.includes("payroll processed");
-        const status = approved ? "approved" : "pending";
-
-        all.push({
-          id: it.id,
-          itemName: it.name,
-          dateISO,
-          start4,
-          end4,
-          totalHours,
-          jobNumber: jobNumberText,
-          workerName: workerNameText,
-          notes,
-          status,
-        });
-      }
-    } while (cursor);
-
-    // sort newest first by dateISO then end time
-    all.sort((a, b) => {
-      if (a.dateISO > b.dateISO) return -1;
-      if (a.dateISO < b.dateISO) return 1;
-      return Number(b.end4) - Number(a.end4);
-    });
-
-    res.json({ items: all.slice(0, limit) });
-  } catch (e) {
-    console.error("ERROR GET /timesheets:", e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.listen(Number(PORT), () => {
-  console.log("API running on :" + PORT);
-});
+// ---------- server ----------
+const server = app.listen(Number(PORT), () => console.log("API running on :" + PORT));
+server.keepAliveTimeout = 65000;
+server.headersTimeout = 66000;

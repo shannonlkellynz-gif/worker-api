@@ -11,10 +11,12 @@
   "keywords": [],
   "author": "",
   "dependencies": {
+    "compression": "^1.8.1",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
-    "form-data": "^4.0.4"
+    "form-data": "^4.0.4",
+    "helmet": "^8.1.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.0"
