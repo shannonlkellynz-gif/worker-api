@@ -670,12 +670,12 @@ app.post("/timesheets", async (req, res) => {
   }
 });
 
-// ---------- upload (Monday multipart: query + variables[file]) ----------
+// ---------- upload (legacy monday style: query + variables[file]) ----------
 app.post("/upload", async (req, res) => {
   try {
     const {
       jobId,
-      columnId = "file_mkvr42v",      // your Progress column
+      columnId = "file_mkvr42v",            // your Progress / Completed Photos column
       fileName = "photo.jpg",
       base64,
       mime = "image/jpeg",
@@ -684,50 +684,50 @@ app.post("/upload", async (req, res) => {
     if (!jobId) return res.status(400).json({ ok: false, error: "jobId required" });
     if (!base64) return res.status(400).json({ ok: false, error: "base64 required" });
 
-    // Strip data URL prefix if present
-    const clean = base64.replace(/^data:[^;]+;base64,/, "");
-    const buffer = Buffer.from(clean, "base64");
+    // strip a data URI prefix if the client sends one
+    const cleanB64 = base64.replace(/^data:[^;]+;base64,/, "");
+    const buf = Buffer.from(cleanB64, "base64");
 
     const form = new FormData();
+    const gql = `
+      mutation ($file: File!) {
+        add_file_to_column(
+          item_id: ${Number(jobId)},
+          column_id: "${columnId}",
+          file: $file
+        ) { id }
+      }
+    `.trim();
 
-    // This is a valid Monday pattern: "query" + "variables[file]"
-    form.append(
-      "query",
-      `mutation ($file: File!) {
-        add_file_to_column(item_id: ${Number(jobId)}, column_id: "${columnId}", file: $file) { id }
-      }`
-    );
-    form.append("variables[file]", buffer, { filename: fileName, contentType: mime });
+    // This is the older pattern Monday accepts:
+    form.append("query", gql);
+    form.append("variables[file]", buf, { filename: fileName, contentType: mime });
 
-    // VERY IMPORTANT: include multipart headers from form-data
-    const headers = {
-      ...form.getHeaders(),                // adds Content-Type with boundary
-      Authorization: `Bearer ${MONDAY_TOKEN}`,
-    };
-
-    const resp = await fetch("https://api.monday.com/v2/file", {
+    const resp = await fetch(MONDAY_FILE_API, {
       method: "POST",
-      headers,
+      headers: {
+        Authorization: `Bearer ${MONDAY_TOKEN}`,
+        ...form.getHeaders(),
+      },
       body: form,
     });
 
     const text = await resp.text();
-    let json;
-    try { json = JSON.parse(text); } catch { json = null; }
+    let data;
+    try { data = JSON.parse(text); } catch { data = null; }
 
-    if (!resp.ok || json?.errors) {
-      console.error("UPLOAD ERROR DETAIL:", json || text);
+    if (!resp.ok || data?.errors) {
+      console.error("UPLOAD ERROR DETAIL:", data || text);
       return res.status(502).json({
         ok: false,
-        error: json?.errors?.[0]?.message || json?.error_message || text || "Upload failed",
-        details: json || text,
+        error: data?.error_message || data?.errors?.[0]?.message || "Upload failed",
       });
     }
 
-    return res.json({ ok: true, id: json?.data?.add_file_to_column?.id || null });
-  } catch (err) {
-    console.error("ERROR /upload:", err);
-    return res.status(500).json({ ok: false, error: err?.message || "Server error" });
+    return res.json({ ok: true, id: data?.data?.add_file_to_column?.id ?? null });
+  } catch (e) {
+    console.error("ERROR /upload:", e);
+    return res.status(500).json({ ok: false, error: e?.message || "Server error" });
   }
 });
 // ---------- server ----------
