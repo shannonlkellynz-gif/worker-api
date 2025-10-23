@@ -4,7 +4,6 @@ const cors = require("cors");
 const dotenv = require("dotenv");
 const FormData = require("form-data");
 const compression = require("compression");
-const multer = require("multer");               // NEW
 const fetch = require("node-fetch");            // Force node-fetch v2 for multipart compatibility
 
 dotenv.config();
