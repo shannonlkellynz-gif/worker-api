@@ -5,19 +5,23 @@ const dotenv = require("dotenv");
 const FormData = require("form-data");
 const compression = require("compression");
 
+// If your Node version doesn't have global fetch, uncomment the next line:
+// global.fetch = require("node-fetch");
+
 dotenv.config();
 
 const app = express();
 app.disable("x-powered-by");
 
-// ✅ Enable CORS first
+// CORS first
 app.use(cors());
 
-// ✅ Enable gzip compression early
+// gzip compression early
 app.use(compression({ level: 6 }));
 
-// ✅ Then handle JSON bodies
-app.use(express.json({ limit: "10mb" }));
+// Larger body limits (for base64 image uploads)
+app.use(express.json({ limit: "25mb" }));
+app.use(express.urlencoded({ limit: "25mb", extended: true }));
 
 // ---------- tiny timing logger ----------
 app.use((req, res, next) => {
@@ -102,7 +106,7 @@ async function monday(query, variables = {}, isFile = false, form) {
     if (isFile && form) {
       const r = await fetch(MONDAY_FILE_API, {
         method: "POST",
-        headers: { Authorization: `Bearer ${MONDAY_TOKEN}` },
+        headers: { Authorization: `Bearer ${MONDAY_TOKEN}`, ...(form.getHeaders?.() || {}) },
         body: form,
       });
       const j = await r.json();
@@ -612,25 +616,82 @@ app.get("/timesheets", async (req, res) => {
     console.error("ERROR GET /timesheets:", e);
     res.status(500).json({ error: e.message });
   }
-});// ---------- upload ----------
+}); // IMPORTANT: close GET /timesheets properly
+
+// ---------- timesheet submit (create item on Monday) ----------
+app.post("/timesheets", async (req, res) => {
+  try {
+    const {
+      email,
+      workerName,
+      subitemId,   // optional
+      jobNumber,
+      date,        // ISO yyyy-mm-dd
+      startNum,    // e.g. 730 or 0730
+      endNum,      // e.g. 1700
+      tookLunch,   // boolean
+      totalHours,  // number
+      jobComplete, // boolean
+      notes        // string
+    } = req.body || {};
+
+    if (!email || !jobNumber || !date) {
+      return res.status(400).json({ ok: false, error: "Missing required fields (email, jobNumber, date)" });
+    }
+
+    const cols = {};
+    if (TS_DATE_COLUMN_ID)              cols[TS_DATE_COLUMN_ID]              = { date };
+    if (TS_NAME_COLUMN_ID)              cols[TS_NAME_COLUMN_ID]              = workerName || email;
+    if (TS_START_NUM_COLUMN_ID)         cols[TS_START_NUM_COLUMN_ID]         = String(startNum || "").replace(/\D/g, "");
+    if (TS_FINISH_NUM_COLUMN_ID)        cols[TS_FINISH_NUM_COLUMN_ID]        = String(endNum || "").replace(/\D/g, "");
+    if (TS_LUNCH_TEXT_COLUMN_ID)        cols[TS_LUNCH_TEXT_COLUMN_ID]        = tookLunch ? "Yes" : "No";
+    if (TS_JOBNUMBER_TEXT_COLUMN_ID)    cols[TS_JOBNUMBER_TEXT_COLUMN_ID]    = jobNumber;
+    if (TS_TOTAL_HOURS_NUM_COLUMN_ID)   cols[TS_TOTAL_HOURS_NUM_COLUMN_ID]   = Number(totalHours) || 0;
+    if (TS_NOTES_LONGTEXT_COLUMN_ID)    cols[TS_NOTES_LONGTEXT_COLUMN_ID]    = String(notes || "");
+    if (TS_JOB_COMPLETE_TEXT_COLUMN_ID) cols[TS_JOB_COMPLETE_TEXT_COLUMN_ID] = jobComplete ? "Yes" : "No";
+
+    const itemName = `${workerName || email} – ${date} – ${jobNumber} – ${Number(totalHours) || 0}h`;
+
+    const mutation = `
+      mutation CreateTs($boardId: ID!, $itemName: String!, $columnVals: JSON!) {
+        create_item(board_id: $boardId, item_name: $itemName, column_values: $columnVals) { id }
+      }
+    `;
+    const data = await monday(mutation, {
+      boardId: TIMESHEETS_BOARD_ID,
+      itemName,
+      columnVals: JSON.stringify(cols),
+    });
+
+    return res.json({ ok: true, id: data?.create_item?.id || null });
+  } catch (e) {
+    console.error("ERROR POST /timesheets:", e);
+    return res.status(500).json({ ok: false, error: e?.message || "Server error" });
+  }
+});
+
+// ---------- upload (photos/files) ----------
 app.post("/upload", async (req, res) => {
   try {
-    const { jobId, columnId = "files", fileName = "photo.jpg", base64 } = req.body;
+    const { jobId, columnId = "files", fileName = "photo.jpg", base64 } = req.body || {};
+    if (!jobId)  return res.status(400).json({ error: "jobId required" });
     if (!base64) return res.status(400).json({ error: "base64 required" });
 
     const buf = Buffer.from(base64, "base64");
-    const form = new FormData();F
-    const gql = `mutation ($file: File!) {
-      add_file_to_column(item_id:${Number(jobId)}, column_id:"${columnId}", file:$file) { id }
-    }`;
+    const form = new FormData();
+    const gql = `
+      mutation ($file: File!) {
+        add_file_to_column(item_id:${Number(jobId)}, column_id:"${columnId}", file:$file) { id }
+      }
+    `;
     form.append("query", gql);
     form.append("variables[file]", buf, { filename: fileName, contentType: "image/jpeg" });
 
     const r = await monday("", {}, true, form);
-    res.json(r);
+    return res.json({ ok: true, result: r });
   } catch (e) {
     console.error("ERROR /upload:", e);
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: e?.message || String(e) });
   }
 });
 
