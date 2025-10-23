@@ -673,7 +673,7 @@ app.post("/timesheets", async (req, res) => {
 // ---------- upload (Monday official format) ----------
 app.post("/upload", async (req, res) => {
   try {
-    const { jobId, columnId = "files", fileName = "photo.jpg", base64 } = req.body || {};
+    const { jobId, columnId = "file_mkvr42v", fileName = "photo.jpg", base64 } = req.body || {};
     if (!jobId) return res.status(400).json({ ok: false, error: "jobId required" });
     if (!base64) return res.status(400).json({ ok: false, error: "base64 required" });
 
