@@ -1317,16 +1317,18 @@ app.get("/monday/webhook", (req, res) => {
   res.status(200).send(String(req.query.challenge || "ok"));
 });
 
-// Event receiver
+// Event receiver (handles POST challenge + normal events)
 app.post("/monday/webhook", bodyParser.json({ limit: "1mb" }), async (req, res) => {
-  // ACK immediately so Monday doesn’t retry
+  // If Monday is verifying the URL, it sends { challenge: "..." } in the POST body.
+  if (req.body && req.body.challenge) {
+    return res.status(200).send(String(req.body.challenge));
+  }
+
+  // Normal event path: ACK immediately so Monday doesn’t retry
   res.status(200).send("ok");
 
   try {
-    const ev = req.body && (req.body.event || req.body.payload || req.body);
-    if (!ev) return;
-
-    // Normalise payload fields
+    const ev = (req.body && (req.body.event || req.body.payload || req.body)) || {};
     const columnId = String(ev.columnId || ev.column_id || ev.value?.columnId || "");
     const itemId   = String(ev.pulseId || ev.itemId || ev.entityId || ev.subitemId || "");
     if (!itemId || !columnId) return;
@@ -1344,7 +1346,7 @@ app.post("/monday/webhook", bodyParser.json({ limit: "1mb" }), async (req, res) 
       assignedEmails = raw.split(/[,;]/).map(s => s.trim()).filter(Boolean);
     }
 
-    // Job number for nicer title (fallback to subitem name)
+    // Job number for title (fallback to subitem name)
     let jobNumber = "";
     if (SUBITEMS_JOBNUMBER_COLUMN_ID) {
       const q2 = `
@@ -1360,7 +1362,7 @@ app.post("/monday/webhook", bodyParser.json({ limit: "1mb" }), async (req, res) 
       }
     }
 
-    // Tailor the message by column
+    // Tailored message
     let body = "Open the job to see new changes.";
     if (columnId === TIME_ALLOWANCE_COLUMN_ID) body = "Time allowance updated.";
     else if (columnId === SUBITEMS_SCOPE_LONGTEXT_COLUMN_ID) body = "Scope updated.";
@@ -1368,10 +1370,7 @@ app.post("/monday/webhook", bodyParser.json({ limit: "1mb" }), async (req, res) 
     else if (NOTIFY_FILE_COLUMN_IDS.includes(columnId)) body = "New/updated document(s).";
 
     const payload = {
-      notification: {
-        title: jobNumber ? `Job ${jobNumber} Updated` : "Job Updated",
-        body,
-      },
+      notification: { title: jobNumber ? `Job ${jobNumber} Updated` : "Job Updated", body },
       data: { type: "job_update", subitemId: String(itemId) },
       android: { priority: "high" },
     };
