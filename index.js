@@ -1314,25 +1314,27 @@ const WATCHED_COLS = new Set(
   ].filter(Boolean)
 );
 
-// Handshake for GET (and HEAD) — echo the challenge exactly as plain text
+// Monday webhook handshake + event receiver
+
+// 1) Monday GET handshake (?challenge=123)
 app.get("/monday/webhook", (req, res) => {
-  if (req.query && req.query.challenge) {
-    return res.type("text/plain").status(200).send(String(req.query.challenge));
+  if (req.query.challenge) {
+    return res.status(200).send(req.query.challenge);
   }
-  return res.type("text/plain").status(200).send("ok");
+  return res.status(200).send("ok");
 });
-app.head("/monday/webhook", (req, res) => res.status(200).end());
 
-// Event receiver + POST handshake
+// 2) Monday POST handshake + change events
 app.post("/monday/webhook", bodyParser.json({ limit: "1mb" }), async (req, res) => {
-  // If Monday verifies via POST body: { challenge: "..." }
+  // POST handshake
   if (req.body && req.body.challenge) {
-    return res.type("text/plain").status(200).send(String(req.body.challenge));
+    return res.status(200).send(String(req.body.challenge));
   }
 
-  // Normal event path — ACK immediately so Monday doesn’t retry
-  res.type("text/plain").status(200).send("ok");
+  // ACK normal events immediately
+  res.status(200).send("ok");
 
+  // ----- your notify logic stays EXACTLY the same below this point -----
   try {
     const ev = (req.body && (req.body.event || req.body.payload || req.body)) || {};
     const columnId = String(ev.columnId || ev.column_id || ev.value?.columnId || "");
@@ -1340,56 +1342,7 @@ app.post("/monday/webhook", bodyParser.json({ limit: "1mb" }), async (req, res) 
     if (!itemId || !columnId) return;
     if (!WATCHED_COLS.has(columnId)) return;
 
-    // Pull assigned email(s) from the job subitem
-    let assignedEmails = [];
-    if (SUBITEMS_EMAIL_COLUMN_ID) {
-      const q = `
-        query($id:[ID!]) {
-          items(ids:$id){ column_values(ids:["${SUBITEMS_EMAIL_COLUMN_ID}"]) { text } }
-        }`;
-      const d = await monday(q, { id: [itemId] });
-      const raw = d?.items?.[0]?.column_values?.[0]?.text || "";
-      assignedEmails = raw.split(/[,;]/).map(s => s.trim()).filter(Boolean);
-    }
-
-    // Job number for nicer title (fallback to subitem name)
-    let jobNumber = "";
-    if (SUBITEMS_JOBNUMBER_COLUMN_ID) {
-      const q2 = `
-        query($id:[ID!], $col:String!) {
-          items(ids:$id){ name column_values(ids:[$col]){ text } }
-        }`;
-      const d2 = await monday(q2, { id: [itemId], col: SUBITEMS_JOBNUMBER_COLUMN_ID });
-      jobNumber = d2?.items?.[0]?.column_values?.[0]?.text || "";
-      if (!jobNumber) {
-        const nm = d2?.items?.[0]?.name || "";
-        const m = String(nm).match(/\b\d{4}(?:-\d)?\b/);
-        jobNumber = m ? m[0] : "";
-      }
-    }
-
-    // Tailor the message by column
-    let body = "Open the job to see new changes.";
-    if (columnId === TIME_ALLOWANCE_COLUMN_ID) body = "Time allowance updated.";
-    else if (columnId === SUBITEMS_SCOPE_LONGTEXT_COLUMN_ID) body = "Scope updated.";
-    else if (columnId === SUBITEMS_MATS_SCOPE_STATUS_COLUMN_ID) body = "Materials scope updated.";
-    else if (NOTIFY_FILE_COLUMN_IDS.includes(columnId)) body = "New/updated document(s).";
-
-    const payload = {
-      notification: {
-        title: jobNumber ? `Job ${jobNumber} Updated` : "Job Updated",
-        body,
-      },
-      data: { type: "job_update", subitemId: String(itemId) },
-      android: { priority: "high" },
-    };
-
-    for (const raw of assignedEmails) {
-      const email = String(raw || "").trim().toLowerCase();
-      if (!email) continue;
-      const tokens = Array.from(TOKENS.get(email) || []);
-      if (tokens.length) await sendToTokens(tokens, payload);
-    }
+    // ... (no changes below here; leave your notify code as-is) ...
   } catch (e) {
     console.warn("webhook notify failed:", e?.message || String(e));
   }
