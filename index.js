@@ -1299,7 +1299,9 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     console.error("ERROR /upload:", e?.message || e);
     return res.status(500).json({ ok: false, error: e?.message || "Server error" });
   }
-});// -------- MONDAY WEBHOOK: notify on key column changes (scope/time/materials/files) --------
+});
+
+// -------- MONDAY WEBHOOK: notify on key column changes (scope/time/materials/files) --------
 const NOTIFY_FILE_COLUMN_IDS = String(process.env.NOTIFY_FILE_COLUMN_IDS || "")
   .split(",").map(s => s.trim()).filter(Boolean);
 
@@ -1312,22 +1314,24 @@ const WATCHED_COLS = new Set(
   ].filter(Boolean)
 );
 
-app.all("/monday/webhook", (req, res) => {
+// Handshake for GET (and HEAD) — echo the challenge exactly as plain text
+app.get("/monday/webhook", (req, res) => {
   if (req.query && req.query.challenge) {
-    return res.status(200).send(req.query.challenge);
+    return res.type("text/plain").status(200).send(String(req.query.challenge));
   }
-  return res.status(200).send("ok");
+  return res.type("text/plain").status(200).send("ok");
 });
+app.head("/monday/webhook", (req, res) => res.status(200).end());
 
-// Event receiver (handles POST challenge + normal events)
+// Event receiver + POST handshake
 app.post("/monday/webhook", bodyParser.json({ limit: "1mb" }), async (req, res) => {
-  // If Monday is verifying the URL, it sends { challenge: "..." } in the POST body.
+  // If Monday verifies via POST body: { challenge: "..." }
   if (req.body && req.body.challenge) {
-    return res.status(200).send(String(req.body.challenge));
+    return res.type("text/plain").status(200).send(String(req.body.challenge));
   }
 
-  // Normal event path: ACK immediately so Monday doesn’t retry
-  res.status(200).send("ok");
+  // Normal event path — ACK immediately so Monday doesn’t retry
+  res.type("text/plain").status(200).send("ok");
 
   try {
     const ev = (req.body && (req.body.event || req.body.payload || req.body)) || {};
@@ -1348,7 +1352,7 @@ app.post("/monday/webhook", bodyParser.json({ limit: "1mb" }), async (req, res) 
       assignedEmails = raw.split(/[,;]/).map(s => s.trim()).filter(Boolean);
     }
 
-    // Job number for title (fallback to subitem name)
+    // Job number for nicer title (fallback to subitem name)
     let jobNumber = "";
     if (SUBITEMS_JOBNUMBER_COLUMN_ID) {
       const q2 = `
@@ -1364,7 +1368,7 @@ app.post("/monday/webhook", bodyParser.json({ limit: "1mb" }), async (req, res) 
       }
     }
 
-    // Tailored message
+    // Tailor the message by column
     let body = "Open the job to see new changes.";
     if (columnId === TIME_ALLOWANCE_COLUMN_ID) body = "Time allowance updated.";
     else if (columnId === SUBITEMS_SCOPE_LONGTEXT_COLUMN_ID) body = "Scope updated.";
@@ -1372,7 +1376,10 @@ app.post("/monday/webhook", bodyParser.json({ limit: "1mb" }), async (req, res) 
     else if (NOTIFY_FILE_COLUMN_IDS.includes(columnId)) body = "New/updated document(s).";
 
     const payload = {
-      notification: { title: jobNumber ? `Job ${jobNumber} Updated` : "Job Updated", body },
+      notification: {
+        title: jobNumber ? `Job ${jobNumber} Updated` : "Job Updated",
+        body,
+      },
       data: { type: "job_update", subitemId: String(itemId) },
       android: { priority: "high" },
     };
