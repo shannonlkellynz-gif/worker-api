@@ -1312,9 +1312,11 @@ const WATCHED_COLS = new Set(
   ].filter(Boolean)
 );
 
-// Monday "challenge" handshake (works for recipe + custom webhooks)
-app.get("/monday/webhook", (req, res) => {
-  res.status(200).send(String(req.query.challenge || "ok"));
+app.all("/monday/webhook", (req, res) => {
+  if (req.query && req.query.challenge) {
+    return res.status(200).send(req.query.challenge);
+  }
+  return res.status(200).send("ok");
 });
 
 // Event receiver (handles POST challenge + normal events)
