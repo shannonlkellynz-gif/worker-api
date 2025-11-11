@@ -1301,92 +1301,30 @@ app.post("/upload", upload.single("file"), async (req, res) => {
   }
 });
 
-// -------- MONDAY WEBHOOK: notify on key column changes (scope/time/materials/files) --------
-const NOTIFY_FILE_COLUMN_IDS = String(process.env.NOTIFY_FILE_COLUMN_IDS || "")
-  .split(",").map(s => s.trim()).filter(Boolean);
-
-const WATCHED_COLS = new Set(
-  [
-    TIME_ALLOWANCE_COLUMN_ID,
-    SUBITEMS_SCOPE_LONGTEXT_COLUMN_ID,
-    SUBITEMS_MATS_SCOPE_STATUS_COLUMN_ID,
-    ...NOTIFY_FILE_COLUMN_IDS,
-  ].filter(Boolean)
-);
-
-// GET verify (e.g. ?challenge=abc123)
-app.get("/monday/webhook", (req, res) => {
-  const ch = req.query?.challenge;
-  if (ch) return res.status(200).send(String(ch));
-  return res.status(200).send("ok");
-});
-
-// POST verify + events
-app.post("/monday/webhook", express.json({ limit: "1mb" }), async (req, res) => {
-  // Monday’s verification POST: {"challenge":"..."}
-  if (req.body && req.body.challenge) {
-    return res.status(200).send(String(req.body.challenge));
-  }
-
-  // Normal event path: ACK immediately so Monday doesn’t retry
-  res.status(200).send("ok");
-
+// MONDAY WEBHOOK VALIDATION + EVENTS
+app.all("/monday/webhook", express.raw({ type: "*/*" }), (req, res) => {
   try {
-    const ev = (req.body && (req.body.event || req.body.payload || req.body)) || {};
-    const columnId = String(ev.columnId || ev.column_id || ev.value?.columnId || "");
-    const itemId   = String(ev.pulseId || ev.itemId || ev.entityId || ev.subitemId || "");
-    if (!itemId || !columnId) return;
-    if (!WATCHED_COLS.has(columnId)) return;
+    let challenge = "";
 
-    // Pull assigned email(s) from the job subitem
-    let assignedEmails = [];
-    if (SUBITEMS_EMAIL_COLUMN_ID) {
-      const q = `
-        query($id:[ID!]) {
-          items(ids:$id){ column_values(ids:["${SUBITEMS_EMAIL_COLUMN_ID}"]) { text } }
-        }`;
-      const d = await monday(q, { id: [itemId] });
-      const raw = d?.items?.[0]?.column_values?.[0]?.text || "";
-      assignedEmails = raw.split(/[,;]/).map(s => s.trim()).filter(Boolean);
+    if (req.method === "GET") {
+      challenge = req.query.challenge;
+    } else if (req.method === "POST") {
+      try {
+        const body = JSON.parse(req.body.toString());
+        challenge = body.challenge;
+      } catch {}
     }
 
-    // Job number for title (fallback to subitem name)
-    let jobNumber = "";
-    if (SUBITEMS_JOBNUMBER_COLUMN_ID) {
-      const q2 = `
-        query($id:[ID!], $col:String!) {
-          items(ids:$id){ name column_values(ids:[$col]){ text } }
-        }`;
-      const d2 = await monday(q2, { id: [itemId], col: SUBITEMS_JOBNUMBER_COLUMN_ID });
-      jobNumber = d2?.items?.[0]?.column_values?.[0]?.text || "";
-      if (!jobNumber) {
-        const nm = d2?.items?.[0]?.name || "";
-        const m = String(nm).match(/\b\d{4}(?:-\d)?\b/);
-        jobNumber = m ? m[0] : "";
-      }
+    if (challenge) {
+      res.set("Content-Type", "text/plain");
+      return res.status(200).send(challenge);
     }
 
-    // Tailored message
-    let body = "Open the job to see new changes.";
-    if (columnId === TIME_ALLOWANCE_COLUMN_ID) body = "Time allowance updated.";
-    else if (columnId === SUBITEMS_SCOPE_LONGTEXT_COLUMN_ID) body = "Scope updated.";
-    else if (columnId === SUBITEMS_MATS_SCOPE_STATUS_COLUMN_ID) body = "Materials scope updated.";
-    else if (NOTIFY_FILE_COLUMN_IDS.includes(columnId)) body = "New/updated document(s).";
+    // If it's not a validation call, ACK and process async later
+    res.status(200).send("ok");
 
-    const payload = {
-      notification: { title: jobNumber ? `Job ${jobNumber} Updated` : "Job Updated", body },
-      data: { type: "job_update", subitemId: String(itemId) },
-      android: { priority: "high" },
-    };
-
-    for (const raw of assignedEmails) {
-      const email = String(raw || "").trim().toLowerCase();
-      if (!email) continue;
-      const tokens = Array.from(TOKENS.get(email) || []);
-      if (tokens.length) await sendToTokens(tokens, payload);
-    }
-  } catch (e) {
-    console.warn("webhook notify failed:", e?.message || String(e));
+  } catch (err) {
+    res.status(200).send("ok");
   }
 });
 
