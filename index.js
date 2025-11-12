@@ -1301,113 +1301,41 @@ app.post("/upload", upload.single("file"), async (req, res) => {
   }
 });
 
-// MONDAY WEBHOOK VALIDATION + EVENTS + ZAPIER COMPAT
-
-// Helper: pull assigned emails + job number for a subitem
-async function getAssignedEmailsAndJobNumber(itemId) {
-  let emails = [];
-  let jobNumber = "";
-
-  // Assigned emails (comma/semicolon separated)
-  if (SUBITEMS_EMAIL_COLUMN_ID) {
-    const q = `
-      query($id:[ID!]) {
-        items(ids:$id) { column_values(ids:["${SUBITEMS_EMAIL_COLUMN_ID}"]) { text } }
-      }`;
-    const d = await monday(q, { id: [itemId] });
-    const raw = d?.items?.[0]?.column_values?.[0]?.text || "";
-    emails = raw.split(/[,;]/).map(s => s.trim()).filter(Boolean);
-  }
-
-  // Job number (prefer column, fall back to name token like 2762-5)
-  if (SUBITEMS_JOBNUMBER_COLUMN_ID) {
-    const q = `
-      query($id:[ID!], $colId:String!) {
-        items(ids:$id){ name column_values(ids:[$colId]){ text } }
-      }`;
-    const d = await monday(q, { id: [itemId], colId: SUBITEMS_JOBNUMBER_COLUMN_ID });
-    jobNumber = d?.items?.[0]?.column_values?.[0]?.text || "";
-    if (!jobNumber) {
-      const nm = d?.items?.[0]?.name || "";
-      const m = String(nm).match(/\b\d{4}(?:-\d)?\b/);
-      jobNumber = m ? m[0] : "";
-    }
-  }
-
-  return { emails, jobNumber };
-}
-
-/**
- * A) Keep Monday's validation flow (used if you wire Monday directly)
- *    - Replies with the `challenge` string
- */
-app.all("/monday/webhook", express.text({ type: "*/*" }), (req, res) => {
+// MONDAY WEBHOOK: handle Monday challenge OR Zapier JSON and PUSH
+app.all("/monday/webhook", express.json({ type: "*/*" }), async (req, res) => {
   try {
-    let challenge = "";
-    if (req.method === "GET") {
-      challenge = req.query.challenge;
-    } else if (req.method === "POST") {
-      try {
-        const body = JSON.parse(req.body || "{}");
-        challenge = body.challenge;
-      } catch {}
-    }
+    // A) Monday challenge (when wiring Monday directly)
+    const challenge =
+      (req.method === "GET" && req.query?.challenge) ||
+      (req.body && req.body.challenge);
     if (challenge) {
       res.set("Content-Type", "text/plain");
-      return res.status(200).send(challenge);
+      return res.status(200).send(String(challenge));
     }
-    return res.status(200).send("ok");
-  } catch {
-    return res.status(200).send("ok");
-  }
-});
 
-/**
- * B) Zapier JSON webhook (this is what your Zap is calling)
- *    URL in Zapier: https://<your-host>/mondaywebhook
- *    Body example:
- *    {
- *      "board_id":"1888971901",
- *      "item_id":"2502737597",
- *      "column_id":"long_text_mkv6eknc",
- *      "column_value":"- Remove kit... ",
- *      "user_id":"62921846",
- *      "parent_item_id":"5023389393"
- *    }
- */
-app.post(["/mondaywebhook", "/zapier/webhook"], express.json(), async (req, res) => {
-  try {
-    const {
-      board_id,
-      item_id,
-      column_id,
-      column_value,
-      user_id,
-      parent_item_id,
-    } = req.body || {};
+    // B) Normal JSON payload (Zapier)
+    const b = req.body || {};
+    const subitemId = String(
+      b.item_id || b.pulseId || b.pulse_id || b.event?.pulseId || b.event?.pulse_id || ""
+    ).trim();
 
-    const subitemId = String(item_id || "").trim();
-    if (!subitemId) return res.status(400).json({ ok: false, error: "item_id required" });
-
-    // Optional: log for sanity
-    console.log("🔔 ZAPIER HOOK:", {
-      board_id, item_id: subitemId, column_id, has_value: !!column_value, user_id, parent_item_id
+    console.log("🔔 /monday/webhook", {
+      keys: Object.keys(b || {}),
+      item_id: b.item_id,
+      subitemId
     });
 
-    // Look up recipients + job number, then push
-    const { emails, jobNumber } = await getAssignedEmailsAndJobNumber(subitemId);
-    await notifyJobUpdate(subitemId, jobNumber, emails);
+    if (subitemId) {
+      const { emails, jobNumber } = await getAssignedEmailsAndJobNumber(subitemId);
+      await notifyJobUpdate(subitemId, jobNumber, emails);
+      return res.json({ ok: true, notified: emails.length, jobNumber, item_id: subitemId });
+    }
 
-    return res.json({
-      ok: true,
-      notified: emails.length,
-      jobNumber,
-      item_id: subitemId,
-      column_id,
-    });
-  } catch (e) {
-    console.error("ERROR /mondaywebhook:", e?.message || e);
-    return res.status(500).json({ ok: false, error: e?.message || "Server error" });
+    // If we can’t detect an item, still ACK so Zapier is happy.
+    return res.status(200).send("ok");
+  } catch (err) {
+    console.error("ERROR /monday/webhook:", err?.message || err);
+    return res.status(200).send("ok");
   }
 });
 
