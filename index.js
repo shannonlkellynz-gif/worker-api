@@ -1304,7 +1304,7 @@ app.post("/upload", upload.single("file"), async (req, res) => {
 // MONDAY WEBHOOK: handle Monday challenge OR Zapier JSON and PUSH
 app.all("/monday/webhook", express.json({ type: "*/*" }), async (req, res) => {
   try {
-    // A) Monday challenge (when wiring Monday directly)
+    // --- Monday verification challenge (used when linking directly from Monday)
     const challenge =
       (req.method === "GET" && req.query?.challenge) ||
       (req.body && req.body.challenge);
@@ -1313,7 +1313,7 @@ app.all("/monday/webhook", express.json({ type: "*/*" }), async (req, res) => {
       return res.status(200).send(String(challenge));
     }
 
-    // B) Normal JSON payload (Zapier)
+    // --- Normal POST body (Zapier)
     const b = req.body || {};
     const subitemId = String(
       b.item_id || b.pulseId || b.pulse_id || b.event?.pulseId || b.event?.pulse_id || ""
@@ -1322,23 +1322,64 @@ app.all("/monday/webhook", express.json({ type: "*/*" }), async (req, res) => {
     console.log("🔔 /monday/webhook", {
       keys: Object.keys(b || {}),
       item_id: b.item_id,
-      subitemId
+      subitemId,
     });
 
-    if (subitemId) {
-      const { emails, jobNumber } = await getAssignedEmailsAndJobNumber(subitemId);
-      await notifyJobUpdate(subitemId, jobNumber, emails);
-      return res.json({ ok: true, notified: emails.length, jobNumber, item_id: subitemId });
+    if (!subitemId) {
+      return res.status(200).send("ok"); // Nothing useful to process
     }
 
-    // If we can’t detect an item, still ACK so Zapier is happy.
-    return res.status(200).send("ok");
+    // --- Fetch assigned emails + job number for this subitem
+    async function getAssignedEmailsAndJobNumber(itemId) {
+      let emails = [];
+      let jobNumber = "";
+
+      // 1. Pull assigned emails
+      if (SUBITEMS_EMAIL_COLUMN_ID) {
+        const q = `
+          query($id:[ID!]) {
+            items(ids:$id) {
+              column_values(ids:["${SUBITEMS_EMAIL_COLUMN_ID}"]) { text }
+            }
+          }`;
+        const d = await monday(q, { id: [itemId] });
+        const raw = d?.items?.[0]?.column_values?.[0]?.text || "";
+        emails = raw.split(/[,;]/).map((s) => s.trim()).filter(Boolean);
+      }
+
+      // 2. Get job number
+      if (SUBITEMS_JOBNUMBER_COLUMN_ID) {
+        const q = `
+          query($id:[ID!], $colId:String!) {
+            items(ids:$id){ name column_values(ids:[$colId]){ text } }
+          }`;
+        const d = await monday(q, { id: [itemId], colId: SUBITEMS_JOBNUMBER_COLUMN_ID });
+        jobNumber = d?.items?.[0]?.column_values?.[0]?.text || "";
+        if (!jobNumber) {
+          const nm = d?.items?.[0]?.name || "";
+          const m = String(nm).match(/\b\d{4}(?:-\d)?\b/);
+          jobNumber = m ? m[0] : "";
+        }
+      }
+
+      return { emails, jobNumber };
+    }
+
+    // --- Send push notification
+    const { emails, jobNumber } = await getAssignedEmailsAndJobNumber(subitemId);
+    await notifyJobUpdate(subitemId, jobNumber, emails);
+
+    return res.json({
+      ok: true,
+      notified: emails.length,
+      jobNumber,
+      item_id: subitemId,
+    });
   } catch (err) {
     console.error("ERROR /monday/webhook:", err?.message || err);
     return res.status(200).send("ok");
   }
 });
-
 // ---------- server ----------
 const server = app.listen(Number(PORT), () => console.log("API running on :" + PORT));
 server.keepAliveTimeout = 65000;
