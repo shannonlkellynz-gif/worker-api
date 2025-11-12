@@ -271,6 +271,79 @@ async function notifyJobUpdate(subitemId, jobNumber, assignedEmails = []) {
     await sendToTokens(tokens, payload);
   }
 }
+
+// ---------------- PUSH ROUTES (register / unregister / test / debug) ----------------
+
+// register a device token to an email (call this from the app after login)
+app.post("/push/register", express.json(), (req, res) => {
+  try {
+    const email = String(req.body?.email || "").trim().toLowerCase();
+    const token = String(req.body?.token || "").trim();
+    if (!email || !token) return res.status(400).json({ ok: false, error: "email and token required" });
+
+    addToken(email, token);
+    const count = (TOKENS.get(email) || new Set()).size;
+    console.log("✅ registered token", { email, count });
+    res.json({ ok: true, email, tokens: count });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e?.message || "Server error" });
+  }
+});
+
+// optional: unregister (on logout)
+app.post("/push/unregister", express.json(), (req, res) => {
+  try {
+    const email = String(req.body?.email || "").trim().toLowerCase();
+    const token = String(req.body?.token || "").trim();
+    if (!email || !token) return res.status(400).json({ ok: false, error: "email and token required" });
+
+    const set = TOKENS.get(email);
+    if (set) {
+      set.delete(token);
+      if (!set.size) TOKENS.delete(email);
+    }
+    res.json({ ok: true, email, tokens: (TOKENS.get(email) || new Set()).size });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e?.message || "Server error" });
+  }
+});
+
+// manual test push (useful to verify FCM & token)
+app.post("/push/test", express.json(), async (req, res) => {
+  try {
+    const email = String(req.body?.email || "").trim().toLowerCase();
+    const token = String(req.body?.token || "").trim();
+    const subitemId = String(req.body?.subitemId || "").trim();
+    const jobNumber = String(req.body?.jobNumber || "").trim();
+
+    let tokens = [];
+    if (token) tokens = [token];
+    else if (email) tokens = Array.from(TOKENS.get(email) || []);
+    else return res.status(400).json({ ok: false, error: "email or token required" });
+
+    const payload = {
+      notification: {
+        title: jobNumber ? `Job ${jobNumber} Updated` : "Job Updated",
+        body: "Open the job to see new changes.",
+      },
+      data: { type: "job_update", subitemId },
+      android: { priority: "high" },
+    };
+
+    const result = await sendToTokens(tokens, payload);
+    res.json({ ok: true, sent_to: tokens.length, result });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e?.message || "Server error" });
+  }
+});
+
+// quick visibility of registered tokens
+app.get("/debug/push-tokens", (_req, res) => {
+  const rows = [];
+  for (const [email, set] of TOKENS.entries()) rows.push({ email, tokens: set.size });
+  res.json({ count: rows.length, entries: rows });
+});
+
 /** ----------------- Materials + H&S helpers ----------------- */
 const SUBTOKEN_RE = /\b\d{4}-\d\b/;      // e.g. 2762-5
 const MAINTOKEN_RE = /\b(\d{4})\b/;      // e.g. 2762
