@@ -478,19 +478,49 @@ function cvRelation(cvs, id) {
 }
 
 /**
- * Fetch materials based on status mode:
- * - "Only Sub Task Materials": read SUBITEMS_MATERIALS_BOARD_ID; include items whose name starts with subToken (e.g. 2762-5)
- * - "Include Main Scope Materials": read MATERIALS_BOARD_ID; find parent whose name starts with mainToken (e.g. 2762);
- *   include its subitems EXCEPT those whose name starts with `${mainToken}-` (exclude subjob lines)
+ * Fetch materials based on the status label on the job subitem:
  *
- * NEW: Adds Supplier from board-relation column SUBITEMS_MAT_SUPPLIER_RELATION_COLUMN_ID (e.g. "connect_boards6")
+ *  - "Include Main Scope Materials"
+ *      → Look on MATERIALS_BOARD_ID for a parent item whose *name* contains
+ *        the main job number (e.g. "2788"), then pull ALL of its subitems.
+ *
+ *  - "Only Sub Task Materials"
+ *      → Look on SUBITEMS_MATERIALS_BOARD_ID for items whose *name* contains
+ *        the full subtask number (e.g. "2788-2") and only return those rows.
+ *
+ *  In both cases, other words can be in the item/subitem names.
+ *
+ *  materials shape returned:
+ *    {
+ *      mode: "Include Main Scope Materials" | "Only Sub Task Materials",
+ *      byStatus: {
+ *        "<status or 'Uncategorised'>": [
+ *          { id, name, title, notes, status, supplier, supplierIds }
+ *        ]
+ *      }
+ *    }
  */
-async function getMaterialsForJob(jobNumRaw, matScopeStatus) {
-  if (!matScopeStatus || /no materials/i.test(matScopeStatus)) return null;
+async function getMaterialsForJob(jobNumRaw, matScopeStatusRaw) {
+  const matScopeStatus = String(matScopeStatusRaw || "").trim();
+  if (!matScopeStatus) return null;
+
+  const lower = matScopeStatus.toLowerCase();
+
+  // Explicit "no materials" label
+  if (/no material|none|not required|n\/a/.test(lower)) {
+    return null;
+  }
 
   const { subToken, mainToken } = splitJobTokens(jobNumRaw);
+
+  // Decide mode based on label text
   const wantOnlySub = /only sub task materials/i.test(matScopeStatus);
   const wantMain    = /include main scope materials/i.test(matScopeStatus);
+
+  if (!wantOnlySub && !wantMain) {
+    // Unknown label, be safe and return nothing
+    return null;
+  }
 
   const subBoardId   = SUBITEMS_MATERIALS_BOARD_ID;
   const parentBoard  = MATERIALS_BOARD_ID;
@@ -498,20 +528,40 @@ async function getMaterialsForJob(jobNumRaw, matScopeStatus) {
   const titleColId   = SUBITEMS_MAT_TITLE_TEXT_COLUMN_ID;
   const notesColId   = SUBITEMS_MAT_NOTES_LONGTEXT_COLUMN_ID;
   const statusColId  = SUBITEMS_MAT_NOTES_LONGTEXT_STATUS;
-  const supplierColId = SUBITEMS_MAT_SUPPLIER_RELATION_COLUMN_ID; // ✅ new
+  const supplierColId = SUBITEMS_MAT_SUPPLIER_RELATION_COLUMN_ID;
 
   if (!titleColId || !notesColId || !statusColId) return null;
 
-  // CASE A: Only Sub Task Materials
+  // Helper to make a row object from an item + its column_values
+  function makeRow(it) {
+    const cv = Object.fromEntries((it.column_values || []).map(c => [c.id, c]));
+    const supplier = supplierColId ? cvRelation(cv, supplierColId) : { text: "", ids: [] };
+
+    return {
+      id: it.id,
+      name: it.name,
+      title: cvText(cv, titleColId),
+      notes: cvText(cv, notesColId),
+      status: cvText(cv, statusColId) || "Uncategorised",
+      supplier: supplier.text || "",
+      supplierIds: supplier.ids || [],
+    };
+  }
+
+  /** -------- CASE A: Only Sub Task Materials -------- */
   if (wantOnlySub) {
-    if (!subToken || !subBoardId) return null;
+    if (!subBoardId || !subToken) return null;
 
     const q = `
       query($boardId:ID!, $cursor:String){
         boards(ids: [$boardId]) {
           items_page(limit: 100, cursor: $cursor) {
             cursor
-            items { id name column_values { id text type value } }
+            items {
+              id
+              name
+              column_values { id text type value }
+            }
           }
         }
       }`;
@@ -525,32 +575,20 @@ async function getMaterialsForJob(jobNumRaw, matScopeStatus) {
 
       for (const it of (page?.items || [])) {
         const nm = String(it.name || "");
-        if (!nm.startsWith(subToken)) continue; // strict startsWith
-        const cv = Object.fromEntries((it.column_values || []).map(c => [c.id, c]));
-
-        // Supplier (relation): use text for display; keep IDs if needed later
-        const supplier = supplierColId ? cvRelation(cv, supplierColId) : { text: "", ids: [] };
-
-        rows.push({
-          id: it.id,
-          name: nm,
-          title: cvText(cv, titleColId),
-          notes: cvText(cv, notesColId),
-          status: cvText(cv, statusColId) || "Uncategorised",
-          supplier: supplier.text || "",        // display string
-          supplierIds: supplier.ids || [],      // optional: raw IDs
-        });
+        // Match anywhere in the name, e.g. "2788-2 – concrete and steel"
+        if (!nm.includes(subToken)) continue;
+        rows.push(makeRow(it));
       }
     } while (cursor);
 
     return rows.length ? { mode: "Only Sub Task Materials", byStatus: groupByStatus(rows) } : null;
   }
 
-  // CASE B: Include Main Scope Materials
+  /** -------- CASE B: Include Main Scope Materials -------- */
   if (wantMain) {
-    if (!mainToken || !parentBoard) return null;
+    if (!parentBoard || !mainToken) return null;
 
-    // 1) Find the parent item on MATERIALS_BOARD_ID whose name starts with "2762"
+    // 1) Find the parent item on MATERIALS_BOARD_ID whose *name* contains mainToken ("2788")
     const qParent = `
       query($boardId:ID!, $cursor:String){
         boards(ids: [$boardId]) {
@@ -568,6 +606,7 @@ async function getMaterialsForJob(jobNumRaw, matScopeStatus) {
           }
         }
       }`;
+
     let cursor = null;
     let parent = null;
 
@@ -577,7 +616,9 @@ async function getMaterialsForJob(jobNumRaw, matScopeStatus) {
       cursor = page?.cursor || null;
 
       for (const it of (page?.items || [])) {
-        if (String(it.name || "").startsWith(mainToken)) {
+        const nm = String(it.name || "");
+        // Match anywhere in the item name, e.g. "2788 – Lakeview paving materials"
+        if (nm.includes(mainToken)) {
           parent = it;
           cursor = null;
           break;
@@ -587,24 +628,10 @@ async function getMaterialsForJob(jobNumRaw, matScopeStatus) {
 
     if (!parent || !Array.isArray(parent.subitems)) return null;
 
-    // 2) From that parent's subitems: include all except names that start with `${mainToken}-`
+    // 2) Use ALL subitems under that parent as materials (do not filter by name)
     const rows = [];
     for (const si of parent.subitems) {
-      const nm = String(si.name || "");
-      if (nm.startsWith(`${mainToken}-`)) continue; // exclude explicit subjob subitems
-
-      const cv = Object.fromEntries((si.column_values || []).map(c => [c.id, c]));
-      const supplier = supplierColId ? cvRelation(cv, supplierColId) : { text: "", ids: [] };
-
-      rows.push({
-        id: si.id,
-        name: nm,
-        title: cvText(cv, titleColId),
-        notes: cvText(cv, notesColId),
-        status: cvText(cv, statusColId) || "Uncategorised",
-        supplier: supplier.text || "",
-        supplierIds: supplier.ids || [],
-      });
+      rows.push(makeRow(si));
     }
 
     return rows.length ? { mode: "Include Main Scope Materials", byStatus: groupByStatus(rows) } : null;
@@ -612,6 +639,7 @@ async function getMaterialsForJob(jobNumRaw, matScopeStatus) {
 
   return null;
 }
+
 // ---------- debug ----------
 app.get("/debug/ping", (_req, res) => res.json({ ok: true, t: Date.now() }));
 app.get("/debug/env", (_req, res) => {
