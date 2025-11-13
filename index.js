@@ -1516,6 +1516,7 @@ app.all("/monday/webhook", express.json({ type: "*/*" }), async (req, res) => {
 
     console.log("🔔 /monday/webhook", {
       keys: Object.keys(b || {}),
+      board_id: b.board_id,
       item_id: b.item_id,
       subitemId,
       column_id: b.column_id,
@@ -1549,53 +1550,71 @@ app.all("/monday/webhook", express.json({ type: "*/*" }), async (req, res) => {
       }
     }
 
-    // --- Fetch assigned emails + job number + job name for this subitem
+    // --- Fetch assigned emails + job number + job name for this item
     async function getAssignedEmailsJobNumberAndName(itemId) {
       let emails = [];
       let jobNumber = "";
       let jobName = "";
 
-      // 1. Pull assigned emails
-      if (SUBITEMS_EMAIL_COLUMN_ID) {
-        const q = `
-          query($id:[ID!]) {
-            items(ids:$id) {
-              column_values(ids:["${SUBITEMS_EMAIL_COLUMN_ID}"]) { id text value }
-            }
-          }`;
-        const d = await monday(q, { id: [itemId] });
-        const cv = d?.items?.[0]?.column_values?.[0];
-        const raw = cvBestText(cv);
-        emails = raw.split(/[,;]/).map((s) => s.trim()).filter(Boolean);
+      const colIds = [
+        SUBITEMS_EMAIL_COLUMN_ID,
+        SUBITEMS_JOBNUMBER_COLUMN_ID,
+      ].filter(Boolean);
+
+      const q = `
+        query($id:[ID!], $colIds:[String!]) {
+          items(ids:$id){
+            id
+            name
+            board { id name }
+            column_values(ids:$colIds){ id text value }
+          }
+        }`;
+
+      const d = await monday(q, { id: [itemId], colIds });
+      const item = d?.items?.[0];
+
+      if (!item) {
+        console.log("📌 webhook job lookup – item not found", { itemId });
+        return { emails: [], jobNumber: "", jobName: "" };
       }
 
-      // 2. Get job number + name (robust like /details2)
-      if (SUBITEMS_JOBNUMBER_COLUMN_ID) {
-        const q = `
-          query($id:[ID!], $colIds:[String!]!) {
-            items(ids:$id){
-              name
-              column_values(ids:$colIds){ id text value }
-            }
-          }`;
-        const colIds = [SUBITEMS_JOBNUMBER_COLUMN_ID].filter(Boolean);
-        const d = await monday(q, { id: [itemId], colIds });
-        const item = d?.items?.[0];
-        jobName = item?.name || "";
+      jobName = item.name || "";
+      const cvMap = Object.fromEntries(
+        (item.column_values || []).map((cv) => [cv.id, cv])
+      );
 
-        const cvMap = Object.fromEntries(
-          (item?.column_values || []).map((cv) => [cv.id, cv])
-        );
-        jobNumber = cvBestText(cvMap[SUBITEMS_JOBNUMBER_COLUMN_ID]);
-
-        // Fallback: try to pull 4-digit or 4-digit-dash-sub from the name
-        if (!jobNumber) {
-          const m = String(jobName).match(/\b\d{4}(?:-\d)?\b/);
-          jobNumber = m ? m[0] : "";
+      // Emails from subitem email column (if configured)
+      if (SUBITEMS_EMAIL_COLUMN_ID) {
+        const raw = cvBestText(cvMap[SUBITEMS_EMAIL_COLUMN_ID]);
+        if (raw) {
+          emails = raw
+            .split(/[,;]/)
+            .map((s) => s.trim())
+            .filter(Boolean);
         }
       }
 
-      console.log("📌 webhook job lookup", { itemId, jobNumber, jobName, emails });
+      // Job number from configured column (if present)
+      if (SUBITEMS_JOBNUMBER_COLUMN_ID) {
+        jobNumber = cvBestText(cvMap[SUBITEMS_JOBNUMBER_COLUMN_ID]) || "";
+      }
+
+      // Fallback: try to pull 4-digit or 4-digit-dash-sub from the item name
+      if (!jobNumber && jobName) {
+        const m = String(jobName).match(/\b\d{4}(?:-\d)?\b/);
+        if (m) jobNumber = m[0];
+      }
+
+      console.log("📌 webhook job lookup", {
+        itemId,
+        boardId: item.board?.id,
+        boardName: item.board?.name,
+        jobNumber,
+        jobName,
+        emails,
+      });
+
       return { emails, jobNumber, jobName };
     }
 
@@ -1662,6 +1681,7 @@ app.all("/monday/webhook", express.json({ type: "*/*" }), async (req, res) => {
     return res.status(200).send("ok");
   }
 });
+
 // ------------------ ENV DEBUG ROUTE ------------------
 app.get("/debug/env", (req, res) => {
   const keys = Object.keys(process.env).sort();
