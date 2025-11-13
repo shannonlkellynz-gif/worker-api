@@ -1492,7 +1492,7 @@ app.post("/upload", upload.single("file"), async (req, res) => {
   }
 });
 
-// MONDAY WEBHOOK: handle Monday challenge OR Zapier JSON and PUSH
+// MONDAY WEBHOOK: handle Monday challenge + rich push text
 app.all("/monday/webhook", express.json({ type: "*/*" }), async (req, res) => {
   try {
     // --- Monday verification challenge (used when linking directly from Monday)
@@ -1504,10 +1504,14 @@ app.all("/monday/webhook", express.json({ type: "*/*" }), async (req, res) => {
       return res.status(200).send(String(challenge));
     }
 
-    // --- Normal POST body (Zapier)
     const b = req.body || {};
     const subitemId = String(
-      b.item_id || b.pulseId || b.pulse_id || b.event?.pulseId || b.event?.pulse_id || ""
+      b.item_id ||
+      b.pulseId ||
+      b.pulse_id ||
+      b.event?.pulseId ||
+      b.event?.pulse_id ||
+      ""
     ).trim();
 
     console.log("🔔 /monday/webhook", {
@@ -1517,13 +1521,24 @@ app.all("/monday/webhook", express.json({ type: "*/*" }), async (req, res) => {
     });
 
     if (!subitemId) {
-      return res.status(200).send("ok"); // Nothing useful to process
+      return res.status(200).send("ok");
     }
 
-    // --- Fetch assigned emails + job number for this subitem
-    async function getAssignedEmailsAndJobNumber(itemId) {
+    // --- Map column_id → friendly label for the message
+    const CHANGE_LABELS = {
+      [SUBITEMS_SCOPE_LONGTEXT_COLUMN_ID]: "Scope",
+      [SUBITEMS_TIMELINE_COLUMN_ID]: "Timeline",
+      [TIME_ALLOWANCE_COLUMN_ID]: "Time allowance",
+      [SUBITEMS_MATS_SCOPE_STATUS_COLUMN_ID]: "Materials scope",
+    };
+
+    const changedLabel = CHANGE_LABELS[b.column_id] || "Job details";
+
+    // --- Fetch assigned emails + job number + job name for this subitem
+    async function getAssignedEmailsJobNumberAndName(itemId) {
       let emails = [];
       let jobNumber = "";
+      let jobName = "";
 
       // 1. Pull assigned emails
       if (SUBITEMS_EMAIL_COLUMN_ID) {
@@ -1538,33 +1553,85 @@ app.all("/monday/webhook", express.json({ type: "*/*" }), async (req, res) => {
         emails = raw.split(/[,;]/).map((s) => s.trim()).filter(Boolean);
       }
 
-      // 2. Get job number
+      // 2. Get job number + name
       if (SUBITEMS_JOBNUMBER_COLUMN_ID) {
         const q = `
           query($id:[ID!], $colId:String!) {
-            items(ids:$id){ name column_values(ids:[$colId]){ text } }
+            items(ids:$id){
+              name
+              column_values(ids:[$colId]){ text }
+            }
           }`;
         const d = await monday(q, { id: [itemId], colId: SUBITEMS_JOBNUMBER_COLUMN_ID });
-        jobNumber = d?.items?.[0]?.column_values?.[0]?.text || "";
+        const item = d?.items?.[0];
+        jobName = item?.name || "";
+        jobNumber = item?.column_values?.[0]?.text || "";
         if (!jobNumber) {
-          const nm = d?.items?.[0]?.name || "";
-          const m = String(nm).match(/\b\d{4}(?:-\d)?\b/);
+          const m = String(jobName).match(/\b\d{4}(?:-\d)?\b/);
           jobNumber = m ? m[0] : "";
         }
       }
 
-      return { emails, jobNumber };
+      return { emails, jobNumber, jobName };
     }
 
-    // --- Send push notification
-    const { emails, jobNumber } = await getAssignedEmailsAndJobNumber(subitemId);
-    await notifyJobUpdate(subitemId, jobNumber, emails);
+    const { emails, jobNumber, jobName } =
+      await getAssignedEmailsJobNumberAndName(subitemId);
+
+    // --- Build nice title + body
+    let title = "Job Updated";
+    if (jobNumber && jobName) {
+      title = `Job ${jobNumber} – ${jobName}`;
+    } else if (jobNumber) {
+      title = `Job ${jobNumber} Updated`;
+    } else if (jobName) {
+      title = jobName;
+    }
+
+    const body = jobNumber
+      ? `${changedLabel} updated on Job ${jobNumber}.`
+      : `${changedLabel} updated on this job.`;
+
+    // --- Collect FCM tokens for all assigned emails
+    const tokens = [];
+    for (const raw of emails) {
+      const email = String(raw || "").trim().toLowerCase();
+      if (!email) continue;
+      const set = TOKENS.get(email);
+      if (!set) continue;
+      for (const t of set) tokens.push(t);
+    }
+    const uniqueTokens = Array.from(new Set(tokens));
+
+    if (!uniqueTokens.length) {
+      console.log("🔕 No tokens for emails", emails);
+      return res.json({
+        ok: true,
+        notified: 0,
+        reason: "no_tokens",
+        jobNumber,
+        item_id: subitemId,
+      });
+    }
+
+    // --- Send push
+    const result = await sendToTokens(uniqueTokens, {
+      notification: { title, body },
+      data: {
+        type: "job_update",
+        subitemId: String(subitemId),
+        jobNumber: String(jobNumber || ""),
+        jobName: jobName || "",
+        change: changedLabel,
+      },
+    });
 
     return res.json({
       ok: true,
       notified: emails.length,
       jobNumber,
       item_id: subitemId,
+      result,
     });
   } catch (err) {
     console.error("ERROR /monday/webhook:", err?.message || err);
