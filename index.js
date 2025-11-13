@@ -817,25 +817,7 @@ app.get("/jobs/my", async (req, res) => {
     const email = String(req.query.email || "").trim().toLowerCase();
     if (!email) return res.status(400).json({ error: "email required" });
 
-    // --- RAW date coming from the app (usually UTC day from toISOString) ---
-    const rawOnDate = String(req.query.on || "");
-
-    // --- Helper: shift an ISO date string (YYYY-MM-DD) by N days in UTC ---
-    function shiftIsoDate(iso, days) {
-      if (!iso) return "";
-      const parts = iso.split("-");
-      if (parts.length !== 3) return "";
-      const [y, m, d] = parts.map((n) => parseInt(n, 10));
-      if (!y || !m || !d) return "";
-      const dt = new Date(Date.UTC(y, m - 1, d));
-      dt.setUTCDate(dt.getUTCDate() + days);
-      return dt.toISOString().slice(0, 10); // back to "YYYY-MM-DD"
-    }
-
-    // ✅ NZ FIX: our app sends the *UTC* day; in NZ that’s usually "yesterday"
-    // So we normalize here by adding 1 day.
-    const onDate = rawOnDate ? shiftIsoDate(rawOnDate, 1) : "";
-
+    const onDate = String(req.query.on || "");
     const includeWeekends = String(req.query.includeWeekends || "1") !== "0";
     const page = Math.max(1, parseInt(String(req.query.page || "1"), 10));
     const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit || "50"), 10)));
@@ -845,17 +827,14 @@ app.get("/jobs/my", async (req, res) => {
     const hit = cacheGet(cacheKey);
     if (hit) return res.json(hit);
 
-    // Weekend check using the *normalized* onDate
     const isWeekend = (iso) => {
       if (!iso) return false;
-      const [y, m, d] = iso.split("-").map((n) => parseInt(n, 10));
-      if (!y || !m || !d) return false;
-      const dt = new Date(y, m - 1, d); // local JS date
-      const dow = dt.getDay();
+      const dt = new Date(`${iso}T12:00:00Z`);
+      const dow = dt.getUTCDay();
       return dow === 0 || dow === 6;
     };
 
-    // --------- find contractor id ----------
+    // find contractor id
     const contractorQ = `
       query($boardId:ID!, $cursor:String){
         boards(ids: [$boardId]) {
@@ -941,7 +920,6 @@ app.get("/jobs/my", async (req, res) => {
 
           if (onDate) {
             if (!includeWeekends && isWeekend(onDate)) continue;
-            // All dates are "YYYY-MM-DD" so lexicographic compare is fine
             if (!(onDate >= startDate && onDate <= endDate)) continue;
           }
 
@@ -959,10 +937,7 @@ app.get("/jobs/my", async (req, res) => {
             });
             collected++;
           }
-          if (collected >= limit && totalPossible >= offset + limit) {
-            jCursor = null;
-            break loopPages;
-          }
+          if (collected >= limit && totalPossible >= offset + limit) { jCursor = null; break loopPages; }
         }
       }
     } while (jCursor);
@@ -975,6 +950,7 @@ app.get("/jobs/my", async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+
 // ---------- job details (cached) ----------
 app.get("/jobs/:subitemId/details", async (req, res) => {
   const subitemId = String(req.params.subitemId);
