@@ -1518,6 +1518,7 @@ app.all("/monday/webhook", express.json({ type: "*/*" }), async (req, res) => {
       keys: Object.keys(b || {}),
       item_id: b.item_id,
       subitemId,
+      column_id: b.column_id,
     });
 
     if (!subitemId) {
@@ -1534,6 +1535,20 @@ app.all("/monday/webhook", express.json({ type: "*/*" }), async (req, res) => {
 
     const changedLabel = CHANGE_LABELS[b.column_id] || "Job details";
 
+    // --- Helper: best-effort text from a column_value
+    function cvBestText(cv) {
+      if (!cv) return "";
+      const t = String(cv.text || "").trim();
+      if (t) return t;
+      try {
+        const v = typeof cv.value === "string" ? JSON.parse(cv.value) : cv.value;
+        const vt = String(v?.text || "").trim();
+        return vt || "";
+      } catch {
+        return "";
+      }
+    }
+
     // --- Fetch assigned emails + job number + job name for this subitem
     async function getAssignedEmailsJobNumberAndName(itemId) {
       let emails = [];
@@ -1545,33 +1560,42 @@ app.all("/monday/webhook", express.json({ type: "*/*" }), async (req, res) => {
         const q = `
           query($id:[ID!]) {
             items(ids:$id) {
-              column_values(ids:["${SUBITEMS_EMAIL_COLUMN_ID}"]) { text }
+              column_values(ids:["${SUBITEMS_EMAIL_COLUMN_ID}"]) { id text value }
             }
           }`;
         const d = await monday(q, { id: [itemId] });
-        const raw = d?.items?.[0]?.column_values?.[0]?.text || "";
+        const cv = d?.items?.[0]?.column_values?.[0];
+        const raw = cvBestText(cv);
         emails = raw.split(/[,;]/).map((s) => s.trim()).filter(Boolean);
       }
 
-      // 2. Get job number + name
+      // 2. Get job number + name (robust like /details2)
       if (SUBITEMS_JOBNUMBER_COLUMN_ID) {
         const q = `
-          query($id:[ID!], $colId:String!) {
+          query($id:[ID!], $colIds:[String!]!) {
             items(ids:$id){
               name
-              column_values(ids:[$colId]){ text }
+              column_values(ids:$colIds){ id text value }
             }
           }`;
-        const d = await monday(q, { id: [itemId], colId: SUBITEMS_JOBNUMBER_COLUMN_ID });
+        const colIds = [SUBITEMS_JOBNUMBER_COLUMN_ID].filter(Boolean);
+        const d = await monday(q, { id: [itemId], colIds });
         const item = d?.items?.[0];
         jobName = item?.name || "";
-        jobNumber = item?.column_values?.[0]?.text || "";
+
+        const cvMap = Object.fromEntries(
+          (item?.column_values || []).map((cv) => [cv.id, cv])
+        );
+        jobNumber = cvBestText(cvMap[SUBITEMS_JOBNUMBER_COLUMN_ID]);
+
+        // Fallback: try to pull 4-digit or 4-digit-dash-sub from the name
         if (!jobNumber) {
           const m = String(jobName).match(/\b\d{4}(?:-\d)?\b/);
           jobNumber = m ? m[0] : "";
         }
       }
 
+      console.log("📌 webhook job lookup", { itemId, jobNumber, jobName, emails });
       return { emails, jobNumber, jobName };
     }
 
@@ -1638,7 +1662,6 @@ app.all("/monday/webhook", express.json({ type: "*/*" }), async (req, res) => {
     return res.status(200).send("ok");
   }
 });
-
 // ------------------ ENV DEBUG ROUTE ------------------
 app.get("/debug/env", (req, res) => {
   const keys = Object.keys(process.env).sort();
