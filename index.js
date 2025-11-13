@@ -1621,13 +1621,17 @@ app.all("/monday/webhook", express.json({ type: "*/*" }), async (req, res) => {
     const { emails, jobNumber, jobName } =
       await getAssignedEmailsJobNumberAndName(subitemId);
 
-    // --- Build nice title + body
+        // --- Build nice title + body (avoid "Job 2788-2 – 2788-2")
     let title = "Job Updated";
-    if (jobNumber && jobName) {
+
+    if (jobNumber && jobName && jobName !== jobNumber) {
+      // Both present and different: "Job 2788-2 – Kitchen demo & rebuild"
       title = `Job ${jobNumber} – ${jobName}`;
     } else if (jobNumber) {
+      // Only job number, or name == number: "Job 2788-2 Updated"
       title = `Job ${jobNumber} Updated`;
     } else if (jobName) {
+      // Only name
       title = jobName;
     }
 
