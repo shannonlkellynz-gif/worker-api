@@ -337,6 +337,81 @@ app.post("/push/test", express.json(), async (req, res) => {
   }
 });
 
+// --------------------------------------------------
+// 🔔 ZAPIER → POST /push → SEND BEAUTIFUL NOTIFICATION
+// --------------------------------------------------
+app.post("/push", async (req, res) => {
+  try {
+    const body = req.body || {};
+
+    // Allow many possible Zapier field names
+    const subitemId =
+      body.subitemId ||
+      body.itemId ||
+      body.id ||
+      body.pulseId ||
+      body.pulse_id ||
+      "";
+    const jobNumber = body.jobNumber || body.job_number || body.number || "";
+    const jobName = body.jobName || body.name || body.title || "";
+    const change = body.change || body.changed || body.column || "Job updated";
+
+    // --------------------------
+    // 🔧 BUILD NOTIFICATION TEXT
+    // --------------------------
+
+    // TITLE
+    let title = "Job Updated";
+    if (jobNumber && jobName) title = `Job ${jobNumber} – ${jobName}`;
+    else if (jobNumber) title = `Job ${jobNumber} Updated`;
+    else if (jobName) title = jobName;
+
+    // BODY MESSAGE
+    const msg = `${change}`;
+
+    console.log("📨 /push received", { subitemId, jobNumber, jobName, change });
+
+    // --------------------------
+    // 🔧 LOAD ALL REGISTERED TOKENS
+    // --------------------------
+    const tokens = [];
+    for (const set of TOKENS.values()) {
+      for (const t of set) tokens.push(t);
+    }
+
+    if (tokens.length === 0) {
+      return res.json({ ok: true, sent: 0, reason: "no tokens" });
+    }
+
+    // --------------------------
+    // 🔥 SEND NOTIFICATION
+    // --------------------------
+    const result = await admin.messaging().sendEachForMulticast({
+      tokens,
+      notification: {
+        title,
+        body: msg,
+      },
+      data: {
+        type: "job_update",
+        subitemId: String(subitemId),
+        jobNumber: String(jobNumber),
+        jobName: String(jobName),
+      },
+      android: { priority: "high" },
+    });
+
+    return res.json({
+      ok: true,
+      sent: tokens.length,
+      result,
+    });
+
+  } catch (err) {
+    console.error("❌ ERROR /push:", err);
+    res.status(500).json({ ok: false, error: String(err) });
+  }
+});
 // quick visibility of registered tokens
 app.get("/debug/push-tokens", (_req, res) => {
   const rows = [];
@@ -1453,6 +1528,41 @@ app.all("/monday/webhook", express.json({ type: "*/*" }), async (req, res) => {
     return res.status(200).send("ok");
   }
 });
+
+// ------------------ ENV DEBUG ROUTE ------------------
+app.get("/debug/env", (req, res) => {
+  const keys = Object.keys(process.env).sort();
+  const out = {};
+
+  for (const k of keys) {
+    const v = process.env[k];
+    out[k] = v && v.length ? v : "(EMPTY)";
+  }
+
+  // Highlight likely problems
+  const problems = [];
+
+  if (!process.env.SUBITEMS_JOBNUMBER_COLUMN_ID)
+    problems.push("❌ SUBITEMS_JOBNUMBER_COLUMN_ID is EMPTY — job linking will FAIL.");
+
+  if (!process.env.SUBITEMS_SCOPE_LONGTEXT_COLUMN_ID)
+    problems.push("❌ SUBITEMS_SCOPE_LONGTEXT_COLUMN_ID missing — Scope will NOT show.");
+
+  if (!process.env.HS_PDF_URL_COLUMN_ID)
+    problems.push("❌ HS_PDF_URL_COLUMN_ID missing — H&S Docs will NOT show.");
+
+  if (!process.env.MATERIALS_BOARD_ID)
+    problems.push("❌ MATERIALS_BOARD_ID missing — Materials cannot load.");
+
+  return res.json({
+    ok: true,
+    env: out,
+    problems,
+    timestamp: Date.now(),
+  });
+});
+
+
 // ---------- server ----------
 const server = app.listen(Number(PORT), () => console.log("API running on :" + PORT));
 server.keepAliveTimeout = 65000;
