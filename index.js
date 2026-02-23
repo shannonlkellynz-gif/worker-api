@@ -1906,7 +1906,19 @@ const cacheKey = `jobs:${contractorId}:${onDate}:${includeWeekends}:${page}:${li
 const subitemsQ = `
   query($boardId: ID!, $cursor: String, $subCols:[String!]) {
     boards(ids: [$boardId]) {
-      items_page(limit: 100, cursor: $cursor) {
+      items_page(
+        limit: 100,
+        cursor: $cursor,
+        query_params: {
+          rules: [
+            {
+              column_id: "${SUBITEMS_ON_DEVICE_STATUS_COLUMN_ID}",
+              compare_value: ["On Device"]
+            }
+          ],
+          operator: and
+        }
+      ) {
         cursor
         items {
           id
@@ -2003,7 +2015,8 @@ do {
     if (totalPossible > offset && collected < limit) {
       const parentId = String(s?.parent_item?.id || "");
 
-      pending.push({
+      pending.push({  query($boardId: ID!, $cursor: String, $subCols:[String!]) {
+
         parentId,
         parentJobId: parentId,
         parentJobName: s?.parent_item?.name || "",
