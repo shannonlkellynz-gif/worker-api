@@ -2011,7 +2011,7 @@ if (!onDeviceItems.length) continue;
     if (totalPossible > offset && collected < limit) {
       const parentId = String(s?.parent_item?.id || "");
 
-      pending.push({  query($boardId: ID!, $cursor: String, $subCols:[String!]) {
+      pending.push({ 
 
         parentId,
         parentJobId: parentId,
