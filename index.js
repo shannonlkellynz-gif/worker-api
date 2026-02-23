@@ -1906,19 +1906,7 @@ const cacheKey = `jobs:${contractorId}:${onDate}:${includeWeekends}:${page}:${li
 const subitemsQ = `
   query($boardId: ID!, $cursor: String, $subCols:[String!]) {
     boards(ids: [$boardId]) {
-      items_page(
-        limit: 100,
-        cursor: $cursor,
-        query_params: {
-          rules: [
-            {
-              column_id: "${SUBITEMS_ON_DEVICE_STATUS_COLUMN_ID}",
-              compare_value: ["On Device"]
-            }
-          ],
-          operator: and
-        }
-      ) {
+      items_page(limit: 100, cursor: $cursor) {
         cursor
         items {
           id
