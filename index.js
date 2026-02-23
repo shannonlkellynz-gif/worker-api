@@ -1904,9 +1904,18 @@ const cacheKey = `jobs:${contractorId}:${onDate}:${includeWeekends}:${page}:${li
 
     // 1) Pull ONLY subitems where On Device == "On Device"
 const subitemsQ = `
-  query($boardId: ID!, $cursor: String, $subCols:[String!]) {
+  query($boardId: ID!, $cursor: String, $subCols: [String!]) {
     boards(ids: [$boardId]) {
-      items_page(limit: 100, cursor: $cursor) {
+      items_page(
+        limit: 100,
+        cursor: $cursor,
+        query_params: {
+          rules: [
+            { column_id: "${SUBITEMS_ON_DEVICE_STATUS_COLUMN_ID}", compare_value: ["On Device"] }
+          ],
+          operator: and
+        }
+      ) {
         cursor
         items {
           id
@@ -1916,7 +1925,8 @@ const subitemsQ = `
         }
       }
     }
-  }`;
+  }
+`;
 
     // Helper: fetch parent job addresses for ONLY the parents we actually need
     async function fetchParentAddresses(parentIds = []) {
@@ -1964,14 +1974,9 @@ do {
   const items = itemsPage?.items || [];
   if (!items.length) continue;
 
-  const onDeviceItems = items.filter((it) => {
-    const cv = (it.column_values || []).find(
-      (c) => c.id === SUBITEMS_ON_DEVICE_STATUS_COLUMN_ID
-    );
-    return String(cv?.text || "").trim() === "On Device";
-  });
-
-  if (!onDeviceItems.length) continue;
+  // Already filtered by query_params above
+const onDeviceItems = items;
+if (!onDeviceItems.length) continue;
 
   const pending = [];
 
