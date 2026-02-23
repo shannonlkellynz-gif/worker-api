@@ -1903,13 +1903,12 @@ const cacheKey = `jobs:${contractorId}:${onDate}:${includeWeekends}:${page}:${li
     const addrCols = [JOBS_ADDRESS_COLUMN_ID].filter(Boolean);
 
     // 1) Pull ONLY subitems where On Device == "On Device"
-    const subitemsQ = `
-  query($boardId: ID!, $cursor: String, $colId: String!, $colValue: String!, $subCols:[String!]) {
+const subitemsQ = `
+  query($boardId: ID!, $cursor: String, $subCols:[String!]) {
     boards(ids: [$boardId]) {
-      items_page_by_column_values(
+      items_page(
         limit: 100,
-        cursor: $cursor,
-        columns: [{ column_id: $colId, column_values: [$colValue] }]
+        cursor: $cursor
       ) {
         cursor
         items {
@@ -1958,24 +1957,29 @@ const cacheKey = `jobs:${contractorId}:${onDate}:${includeWeekends}:${page}:${li
     // Page through ONLY "On Device" subitems (server-side filtered by Monday)
     do {
       const d = await monday(subitemsQ, {
-        boardId: SUBITEMS_BOARD_ID,
-        cursor,
-        colId: SUBITEMS_ON_DEVICE_STATUS_COLUMN_ID,
-        colValue: "On Device",
-        subCols,
-      });
+  boardId: SUBITEMS_BOARD_ID,
+  cursor,
+  subCols,
+});
 
-      const page = d?.boards?.[0]?.items_page_by_column_values;
-      cursor = page?.cursor || null;
+const page = d?.boards?.[0]?.items_page;
+cursor = page?.cursor || null;
 
       const items = page?.items || [];
-      if (!items.length) continue;
+if (!items.length) continue;
 
-      // Fetch addresses for just the parents in this page
-      const parentIds = items.map((it) => it?.parent_item?.id).filter(Boolean);
-      const addressByParentId = await fetchParentAddresses(parentIds);
+const onDeviceItems = items.filter((it) => {
+  const cv = (it.column_values || []).find((c) => c.id === SUBITEMS_ON_DEVICE_STATUS_COLUMN_ID);
+  return (cv?.text || "").trim() === "On Device";
+});
 
-      for (const s of items) {
+if (!onDeviceItems.length) continue;
+
+// Fetch addresses for just the parents in this page (ONLY on-device ones)
+const parentIds = onDeviceItems.map((it) => it?.parent_item?.id).filter(Boolean);
+const addressByParentId = await fetchParentAddresses(parentIds);
+
+for (const s of onDeviceItems) {
         const sCols = Object.fromEntries((s.column_values || []).map((cv) => [cv.id, cv]));
 
         // Contractor match (same logic you were using)
