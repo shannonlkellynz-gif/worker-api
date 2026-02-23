@@ -16,10 +16,12 @@
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
     "firebase-admin": "^13.6.0",
-    "form-data": "^4.0.4",
+    "form-data": "^4.0.5",
     "helmet": "^8.1.0",
     "multer": "^2.0.2",
-    "node-fetch": "^2.7.0"
+    "node-fetch": "^2.7.0",
+    "pdf-lib": "^1.17.1",
+    "react-native-svg": "^15.15.3"
   },
   "devDependencies": {
     "nodemon": "^3.1.0"
