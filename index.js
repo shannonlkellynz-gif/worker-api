@@ -1920,14 +1920,17 @@ const subitemsQ = `
         items {
           id
           name
-          parent_item { id name }
-          column_values(ids: $subCols) { id text value }
+          parent_item { id }
+          column_values(ids: $subCols) {
+            id
+            text
+            value
+          }
         }
       }
     }
   }
 `;
-
     // Helper: fetch parent job addresses for ONLY the parents we actually need
     async function fetchParentAddresses(parentIds = []) {
       const ids = Array.from(new Set((parentIds || []).map(String).filter(Boolean)));
