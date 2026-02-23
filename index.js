@@ -1906,10 +1906,7 @@ const cacheKey = `jobs:${contractorId}:${onDate}:${includeWeekends}:${page}:${li
 const subitemsQ = `
   query($boardId: ID!, $cursor: String, $subCols:[String!]) {
     boards(ids: [$boardId]) {
-      items_page(
-        limit: 100,
-        cursor: $cursor
-      ) {
+      items_page(limit: 100, cursor: $cursor) {
         cursor
         items {
           id
@@ -1919,7 +1916,7 @@ const subitemsQ = `
         }
       }
     }
-  }`;;
+  }`;
 
     // Helper: fetch parent job addresses for ONLY the parents we actually need
     async function fetchParentAddresses(parentIds = []) {
@@ -1949,103 +1946,97 @@ const subitemsQ = `
       return dow === 0 || dow === 6;
     };
 
-    let cursor = null;
-    let totalPossible = 0;
-    let collected = 0;
-    const results = [];
+   let cursor = null;
+let totalPossible = 0;
+let collected = 0;
+const results = [];
 
-    // Page through ONLY "On Device" subitems (server-side filtered by Monday)
-    do {
-      const d = await monday(subitemsQ, {
-  boardId: SUBITEMS_BOARD_ID,
-  cursor,
-  subCols,
-});
-
-const itemsPage = d?.boards?.[0]?.items_page;
-cursor = itemsPage?.cursor || null;
-const items = itemsPage?.items || [];
-if (!items.length) continue;
-
-const onDeviceItems = items.filter((it) => {
-  const cv = (it.column_values || []).find((c) => c.id === SUBITEMS_ON_DEVICE_STATUS_COLUMN_ID);
-  return (cv?.text || "").trim() === "On Device";
-});
-
-if (!onDeviceItems.length) continue;
-
-// 1) Collect matching subitems for this contractor WITHOUT fetching addresses yet
-const pending = [];
-
-for (const s of onDeviceItems) {
-  const sCols = Object.fromEntries((s.column_values || []).map((cv) => [cv.id, cv]));
-
-  // Contractor match (same logic you were using)
-  const subTxt = String(
-    sCols[SUBITEMS_SUBCONTRACTOR_TEXT_COLUMN_ID]?.text || ""
-  ).trim();
-
-  if (!contractorNameKey) continue;
-  if (nameKey(subTxt) !== contractorNameKey) continue;
-
-  // Timeline parse
-  let startDate = "", endDate = "";
-  try {
-    const tlVal = sCols[SUBITEMS_TIMELINE_COLUMN_ID]?.value;
-    if (tlVal) {
-      const tl = typeof tlVal === "string" ? JSON.parse(tlVal) : tlVal;
-      startDate = tl?.from || "";
-      endDate = tl?.to || tl?.from || "";
-    }
-  } catch {}
-
-  // Optional onDate filtering
-  if (onDate) {
-    if (!includeWeekends && isWeekend(onDate)) continue;
-    if (!(onDate >= startDate && onDate <= endDate)) continue;
-  }
-
-  totalPossible++;
-
-  if (totalPossible > offset && collected < limit) {
-    const parentId = String(s?.parent_item?.id || "");
-
-    pending.push({
-      parentId,
-      parentJobId: parentId,
-      parentJobName: s?.parent_item?.name || "",
-      subitemId: s.id,
-      subitemName: s.name,
-      jobNumber: sCols[SUBITEMS_JOBNUMBER_COLUMN_ID]?.text || "",
-      description: sCols[SUBITEMS_DESCRIPTION_COLUMN_ID]?.text || "",
-      timeline: { startDate, endDate },
-    });
-
-    collected++;
-  }
-
-  // Stop early once we've got the requested page
-  if (collected >= limit && totalPossible >= offset + limit) {
-    cursor = null;
-    break;
-  }
-}
-
-// 2) Fetch addresses ONLY for the parents we are actually returning
-const neededParentIds = pending.map((p) => p.parentId).filter(Boolean);
-const addressByParentId = await fetchParentAddresses(neededParentIds);
-
-// 3) Attach addresses and push final results
-for (const p of pending) {
-  results.push({
-    ...p,
-    address: addressByParentId[p.parentId] || "",
+do {
+  const d = await monday(subitemsQ, {
+    boardId: SUBITEMS_BOARD_ID,
+    cursor,
+    subCols,
   });
-}
 
-    const out = { items: results, total: totalPossible, page, limit };
-    cacheSet(cacheKey, out);
-    return res.json(out);
+  const itemsPage = d?.boards?.[0]?.items_page;
+  cursor = itemsPage?.cursor || null;
+
+  const items = itemsPage?.items || [];
+  if (!items.length) continue;
+
+  const onDeviceItems = items.filter((it) => {
+    const cv = (it.column_values || []).find(
+      (c) => c.id === SUBITEMS_ON_DEVICE_STATUS_COLUMN_ID
+    );
+    return String(cv?.text || "").trim() === "On Device";
+  });
+
+  if (!onDeviceItems.length) continue;
+
+  const pending = [];
+
+  for (const s of onDeviceItems) {
+    const sCols = Object.fromEntries((s.column_values || []).map((cv) => [cv.id, cv]));
+
+    const subTxt = String(sCols[SUBITEMS_SUBCONTRACTOR_TEXT_COLUMN_ID]?.text || "").trim();
+
+    if (!contractorNameKey) continue;
+    if (nameKey(subTxt) !== contractorNameKey) continue;
+
+    let startDate = "", endDate = "";
+    try {
+      const tlVal = sCols[SUBITEMS_TIMELINE_COLUMN_ID]?.value;
+      if (tlVal) {
+        const tl = typeof tlVal === "string" ? JSON.parse(tlVal) : tlVal;
+        startDate = tl?.from || "";
+        endDate = tl?.to || tl?.from || "";
+      }
+    } catch {}
+
+    if (onDate) {
+      if (!includeWeekends && isWeekend(onDate)) continue;
+      if (!(onDate >= startDate && onDate <= endDate)) continue;
+    }
+
+    totalPossible++;
+
+    if (totalPossible > offset && collected < limit) {
+      const parentId = String(s?.parent_item?.id || "");
+
+      pending.push({
+        parentId,
+        parentJobId: parentId,
+        parentJobName: s?.parent_item?.name || "",
+        subitemId: s.id,
+        subitemName: s.name,
+        jobNumber: sCols[SUBITEMS_JOBNUMBER_COLUMN_ID]?.text || "",
+        description: sCols[SUBITEMS_DESCRIPTION_COLUMN_ID]?.text || "",
+        timeline: { startDate, endDate },
+      });
+
+      collected++;
+    }
+
+    if (collected >= limit) {
+      cursor = null;
+      break;
+    }
+  }
+
+  const neededParentIds = pending.map((p) => p.parentId).filter(Boolean);
+  const addressByParentId = await fetchParentAddresses(neededParentIds);
+
+  for (const p of pending) {
+    results.push({
+      ...p,
+      address: addressByParentId[p.parentId] || "",
+    });
+  }
+} while (cursor);
+
+const out = { items: results, total: totalPossible, page, limit };
+cacheSet(cacheKey, out);
+return res.json(out);
 
   } catch (e) {
     console.error("ERROR /jobs/my:", e);
