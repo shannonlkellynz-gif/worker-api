@@ -1909,12 +1909,6 @@ const subitemsQ = `
       items_page(
         limit: 100,
         cursor: $cursor,
-        query_params: {
-          rules: [
-            { column_id: "${SUBITEMS_ON_DEVICE_STATUS_COLUMN_ID}", compare_value: ["On Device"] }
-          ],
-          operator: and
-        }
       ) {
         cursor
         items {
@@ -1978,7 +1972,12 @@ do {
   if (!items.length) continue;
 
   // Already filtered by query_params above
-const onDeviceItems = items;
+const onDeviceItems = items.filter((it) => {
+  const cv = (it.column_values || []).find(
+    (c) => c.id === SUBITEMS_ON_DEVICE_STATUS_COLUMN_ID
+  );
+  return String(cv?.text || "").trim() === "On Device";
+});
 if (!onDeviceItems.length) continue;
 
   const pending = [];
