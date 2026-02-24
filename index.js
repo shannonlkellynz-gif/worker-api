@@ -1413,25 +1413,24 @@ const supplierColId = String(SUBITEMS_MAT_SUPPLIER_RELATION_COLUMN_ID || "connec
         const nm = String(it.name || "");
         if (!nm.startsWith(subToken)) continue; // strict startsWith: "2788-2..."
 
-        const cv = Object.fromEntries((it.column_values || []).map(c => [c.id, c]));
-        const supplierRel = supplierColId ? cvRelation(cv, supplierColId) : { text: "", ids: [] };
+        const cv = Object.fromEntries((si.column_values || []).map(c => [c.id, c]));
+const supplierRel = supplierColId ? cvRelation(cv, supplierColId) : { text: "", ids: [] };
 
 let supplierText = String(supplierRel.text || "").trim();
 if (!supplierText && Array.isArray(supplierRel.ids) && supplierRel.ids.length) {
-  const materialTitle = (cvText(cv, titleColId) || "").trim();
+  const names = await getItemNamesByIds(supplierRel.ids);
+  supplierText = names.join(", ");
+}
+
+const materialTitle = (cvText(cv, titleColId) || "").trim();
 
 rows.push({
   id: si.id,
-
-  // ✅ UI-friendly title
   name: materialTitle || nm,
-
   rawName: nm,
-  materialTitle: materialTitle,
-
+  materialTitle,
   notes: notesColId ? cvText(cv, notesColId) : "",
   status: pickStatus(cv),
-
   supplier: supplierText || "",
   supplierIds: supplierRel.ids || [],
 });
@@ -1506,30 +1505,28 @@ for (const si of parent.subitems) {
   const nm = String(si.name || "");
   if (nm.startsWith(`${mainToken}-`)) continue;
 
-  const cv = Object.fromEntries((si.column_values || []).map(c => [c.id, c]));
-  const supplierRel = supplierColId ? cvRelation(cv, supplierColId) : { text: "", ids: [] };
+  const cv = Object.fromEntries((it.column_values || []).map(c => [c.id, c]));
+const supplierRel = supplierColId ? cvRelation(cv, supplierColId) : { text: "", ids: [] };
 
-  let supplierText = String(supplierRel.text || "").trim();
-  if (!supplierText && Array.isArray(supplierRel.ids) && supplierRel.ids.length) {
-    const materialTitle = (cvText(cv, titleColId) || "").trim();
+let supplierText = String(supplierRel.text || "").trim();
+if (!supplierText && Array.isArray(supplierRel.ids) && supplierRel.ids.length) {
+  const names = await getItemNamesByIds(supplierRel.ids);
+  supplierText = names.join(", ");
+}
+
+const materialTitle = (cvText(cv, titleColId) || "").trim();
 
 rows.push({
   id: it.id,
-
-  // ✅ give the UI a human title instead of "2762-5 blah blah"
   name: materialTitle || nm,
-
-  // ✅ keep the raw Monday item name separately (still useful)
   rawName: nm,
-
-  materialTitle: materialTitle,
-
+  materialTitle,
   notes: notesColId ? cvText(cv, notesColId) : "",
   status: pickStatus(cv),
-
   supplier: supplierText || "",
   supplierIds: supplierRel.ids || [],
 });
+
 } // ✅ CLOSE LOOP HERE
 
 console.log("getMaterialsForJob: MAIN SCOPE → subitems rows:", rows.length);
