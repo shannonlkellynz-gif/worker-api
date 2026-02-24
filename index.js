@@ -1355,10 +1355,10 @@ async function getMaterialsForJob(jobNumRaw, matScopeStatus) {
   const subBoardId    = SUBITEMS_MATERIALS_BOARD_ID;
   const parentBoardId = MATERIALS_BOARD_ID;
 
-  const titleColId    = SUBITEMS_MAT_TITLE_TEXT_COLUMN_ID;
-  const notesColId    = SUBITEMS_MAT_NOTES_LONGTEXT_COLUMN_ID;
-  const statusColId   = SUBITEMS_MAT_NOTES_LONGTEXT_STATUS;        // may be blank
-  const supplierColId = SUBITEMS_MAT_SUPPLIER_RELATION_COLUMN_ID;  // relation col
+  const titleColId    = String(SUBITEMS_MAT_TITLE_TEXT_COLUMN_ID || "long_text_mkq1kzgp").trim();
+const notesColId    = SUBITEMS_MAT_NOTES_LONGTEXT_COLUMN_ID;
+const statusColId   = SUBITEMS_MAT_NOTES_LONGTEXT_STATUS;
+const supplierColId = String(SUBITEMS_MAT_SUPPLIER_RELATION_COLUMN_ID || "connect_boards6").trim();
 
   console.log("getMaterialsForJob DEBUG →", {
     jobNumRaw,
@@ -1418,21 +1418,20 @@ async function getMaterialsForJob(jobNumRaw, matScopeStatus) {
 
 let supplierText = String(supplierRel.text || "").trim();
 if (!supplierText && Array.isArray(supplierRel.ids) && supplierRel.ids.length) {
-  const names = await getItemNamesByIds(supplierRel.ids);
-  supplierText = names.join(", ");
-}
+  const materialTitle = (cvText(cv, titleColId) || "").trim();
 
 rows.push({
-  id: it.id,
-  name: nm,
+  id: si.id,
 
-  // ✅ keep material title as data (not the header label)
-  materialTitle: cvText(cv, titleColId),
+  // ✅ UI-friendly title
+  name: materialTitle || nm,
+
+  rawName: nm,
+  materialTitle: materialTitle,
 
   notes: notesColId ? cvText(cv, notesColId) : "",
   status: pickStatus(cv),
 
-  // ✅ supplier becomes the grouping header
   supplier: supplierText || "",
   supplierIds: supplierRel.ids || [],
 });
@@ -1512,19 +1511,25 @@ for (const si of parent.subitems) {
 
   let supplierText = String(supplierRel.text || "").trim();
   if (!supplierText && Array.isArray(supplierRel.ids) && supplierRel.ids.length) {
-    const names = await getItemNamesByIds(supplierRel.ids);
-    supplierText = names.join(", ");
-  }
+    const materialTitle = (cvText(cv, titleColId) || "").trim();
 
-  rows.push({
-    id: si.id,
-    name: nm,
-    materialTitle: cvText(cv, titleColId),
-    notes: notesColId ? cvText(cv, notesColId) : "",
-    status: pickStatus(cv),
-    supplier: supplierText || "",
-    supplierIds: supplierRel.ids || [],
-  });
+rows.push({
+  id: it.id,
+
+  // ✅ give the UI a human title instead of "2762-5 blah blah"
+  name: materialTitle || nm,
+
+  // ✅ keep the raw Monday item name separately (still useful)
+  rawName: nm,
+
+  materialTitle: materialTitle,
+
+  notes: notesColId ? cvText(cv, notesColId) : "",
+  status: pickStatus(cv),
+
+  supplier: supplierText || "",
+  supplierIds: supplierRel.ids || [],
+});
 } // ✅ CLOSE LOOP HERE
 
 console.log("getMaterialsForJob: MAIN SCOPE → subitems rows:", rows.length);
