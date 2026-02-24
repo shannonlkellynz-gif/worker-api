@@ -211,6 +211,7 @@ async function getContractorNameById(contractorId) {
   const d = await monday(q, { ids: [String(contractorId)] });
   return String(d?.items?.[0]?.name || "").trim();
 }
+
 async function getItemNamesByIds(ids = []) {
   const clean = Array.from(new Set((ids || []).map(String).filter(Boolean)));
   if (!clean.length) return [];
@@ -1502,47 +1503,47 @@ rows.push({
 
     // 2) From that parent's subitems: include all except names that start with `${mainToken}-`
     const rows = [];
-    for (const si of parent.subitems) {
-      const nm = String(si.name || "");
-      if (nm.startsWith(`${mainToken}-`)) continue; // exclude explicit subjob-specific subitems
+for (const si of parent.subitems) {
+  const nm = String(si.name || "");
+  if (nm.startsWith(`${mainToken}-`)) continue;
 
-      const cv = Object.fromEntries((si.column_values || []).map(c => [c.id, c]));
-     const supplierRel = supplierColId ? cvRelation(cv, supplierColId) : { text: "", ids: [] };
+  const cv = Object.fromEntries((si.column_values || []).map(c => [c.id, c]));
+  const supplierRel = supplierColId ? cvRelation(cv, supplierColId) : { text: "", ids: [] };
 
-let supplierText = String(supplierRel.text || "").trim();
-if (!supplierText && Array.isArray(supplierRel.ids) && supplierRel.ids.length) {
-  const names = await getItemNamesByIds(supplierRel.ids);
-  supplierText = names.join(", ");
-}
-
-rows.push({
-  id: si.id,
-  name: nm,
-
-  // ✅ keep material title as data (not the header label)
-  materialTitle: cvText(cv, titleColId),
-
-  notes: notesColId ? cvText(cv, notesColId) : "",
-  status: pickStatus(cv),
-
-  // ✅ supplier becomes the grouping header
-  supplier: supplierText || "",
-  supplierIds: supplierRel.ids || [],
-});
-
-    console.log("getMaterialsForJob: MAIN SCOPE → subitems rows:", rows.length);
-    return rows.length
-  ? {
-      mode: "Include Main Scope Materials",
-      byStatus: groupByStatus(rows), // ✅ existing (do not break app)
-      byStatusSupplier: groupByStatusThenSupplier(rows), // ✅ new nested grouping
-    }
-  : null;
+  let supplierText = String(supplierRel.text || "").trim();
+  if (!supplierText && Array.isArray(supplierRel.ids) && supplierRel.ids.length) {
+    const names = await getItemNamesByIds(supplierRel.ids);
+    supplierText = names.join(", ");
   }
 
-  console.log("getMaterialsForJob: status did not match any mode", { jobNumRaw, matScopeStatus });
-  return null;
-}
+  rows.push({
+    id: si.id,
+    name: nm,
+    materialTitle: cvText(cv, titleColId),
+    notes: notesColId ? cvText(cv, notesColId) : "",
+    status: pickStatus(cv),
+    supplier: supplierText || "",
+    supplierIds: supplierRel.ids || [],
+  });
+} // ✅ CLOSE LOOP HERE
+
+console.log("getMaterialsForJob: MAIN SCOPE → subitems rows:", rows.length);
+return rows.length
+  ? {
+      mode: "Include Main Scope Materials",
+      byStatus: groupByStatus(rows),
+      byStatusSupplier: groupByStatusThenSupplier(rows),
+    }
+  : null;
+
+ console.log("getMaterialsForJob: MAIN SCOPE → subitems rows:", rows.length);
+return rows.length
+  ? {
+      mode: "Include Main Scope Materials",
+      byStatus: groupByStatus(rows),
+      byStatusSupplier: groupByStatusThenSupplier(rows),
+    }
+  : null;
 // ---------- debug ----------
 app.get("/debug/ping", (_req, res) => res.json({ ok: true, t: Date.now() }));
 app.get("/debug/env-safe", (_req, res) => {
