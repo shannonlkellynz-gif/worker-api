@@ -212,19 +212,6 @@ async function getContractorNameById(contractorId) {
   return String(d?.items?.[0]?.name || "").trim();
 }
 
-async function getItemNamesByIds(ids = []) {
-  const clean = Array.from(new Set((ids || []).map(String).filter(Boolean)));
-  if (!clean.length) return [];
-
-  const q = `
-    query($ids:[ID!]) {
-      items(ids:$ids) { id name }
-    }`;
-  const d = await monday(q, { ids: clean });
-  return (d?.items || [])
-    .map((it) => String(it?.name || "").trim())
-    .filter(Boolean);
-}
 function cleanPin4(pinRaw) {
   return String(pinRaw || "").replace(/\D/g, "").padStart(4, "0").slice(0, 4);
 }
@@ -1137,18 +1124,6 @@ function groupByStatus(rows) {
   }
   return byStatus;
 }
-function groupByStatusThenSupplier(rows) {
-  const out = {};
-  for (const r of rows) {
-    const status = r.status || "Uncategorised";
-    const supplier = String(r.supplier || "No supplier").trim() || "No supplier";
-
-    if (!out[status]) out[status] = {};
-    if (!out[status][supplier]) out[status][supplier] = [];
-    out[status][supplier].push(r);
-  }
-  return out;
-}
 
 // Pull a Link column's real URL (value.url), or fall back to text
 function cvUrl(cvs, id) {
@@ -1355,10 +1330,10 @@ async function getMaterialsForJob(jobNumRaw, matScopeStatus) {
   const subBoardId    = SUBITEMS_MATERIALS_BOARD_ID;
   const parentBoardId = MATERIALS_BOARD_ID;
 
-  const titleColId    = String(SUBITEMS_MAT_TITLE_TEXT_COLUMN_ID || "long_text_mkq1kzgp").trim();
-const notesColId    = SUBITEMS_MAT_NOTES_LONGTEXT_COLUMN_ID;
-const statusColId   = SUBITEMS_MAT_NOTES_LONGTEXT_STATUS;
-const supplierColId = String(SUBITEMS_MAT_SUPPLIER_RELATION_COLUMN_ID || "connect_boards6").trim();
+  const titleColId    = SUBITEMS_MAT_TITLE_TEXT_COLUMN_ID;
+  const notesColId    = SUBITEMS_MAT_NOTES_LONGTEXT_COLUMN_ID;
+  const statusColId   = SUBITEMS_MAT_NOTES_LONGTEXT_STATUS;        // may be blank
+  const supplierColId = SUBITEMS_MAT_SUPPLIER_RELATION_COLUMN_ID;  // relation col
 
   console.log("getMaterialsForJob DEBUG →", {
     jobNumRaw,
@@ -1413,38 +1388,23 @@ const supplierColId = String(SUBITEMS_MAT_SUPPLIER_RELATION_COLUMN_ID || "connec
         const nm = String(it.name || "");
         if (!nm.startsWith(subToken)) continue; // strict startsWith: "2788-2..."
 
-        const cv = Object.fromEntries((si.column_values || []).map(c => [c.id, c]));
-const supplierRel = supplierColId ? cvRelation(cv, supplierColId) : { text: "", ids: [] };
+        const cv = Object.fromEntries((it.column_values || []).map(c => [c.id, c]));
+        const supplier = supplierColId ? cvRelation(cv, supplierColId) : { text: "", ids: [] };
 
-let supplierText = String(supplierRel.text || "").trim();
-if (!supplierText && Array.isArray(supplierRel.ids) && supplierRel.ids.length) {
-  const names = await getItemNamesByIds(supplierRel.ids);
-  supplierText = names.join(", ");
-}
-
-const materialTitle = (cvText(cv, titleColId) || "").trim();
-
-rows.push({
-  id: si.id,
-  name: materialTitle || nm,
-  rawName: nm,
-  materialTitle,
-  notes: notesColId ? cvText(cv, notesColId) : "",
-  status: pickStatus(cv),
-  supplier: supplierText || "",
-  supplierIds: supplierRel.ids || [],
-});
+        rows.push({
+          id: it.id,
+          name: nm,
+          title: cvText(cv, titleColId),
+          notes: notesColId ? cvText(cv, notesColId) : "",
+          status: pickStatus(cv),
+          supplier: supplier.text || "",
+          supplierIds: supplier.ids || [],
+        });
       }
     } while (cursor);
 
     console.log("getMaterialsForJob: ONLY SUB → rows:", rows.length);
-    return rows.length
-  ? {
-      mode: "Only Sub Task Materials",
-      byStatus: groupByStatus(rows), // ✅ existing (do not break app)
-      byStatusSupplier: groupByStatusThenSupplier(rows), // ✅ new nested grouping
-    }
-  : null;
+    return rows.length ? { mode: "Only Sub Task Materials", byStatus: groupByStatus(rows) } : null;
   }
 
   // CASE B: Include Main Scope Materials
@@ -1501,43 +1461,30 @@ rows.push({
 
     // 2) From that parent's subitems: include all except names that start with `${mainToken}-`
     const rows = [];
-for (const si of parent.subitems) {
-  const nm = String(si.name || "");
-  if (nm.startsWith(`${mainToken}-`)) continue;
+    for (const si of parent.subitems) {
+      const nm = String(si.name || "");
+      if (nm.startsWith(`${mainToken}-`)) continue; // exclude explicit subjob-specific subitems
 
-  const cv = Object.fromEntries((it.column_values || []).map(c => [c.id, c]));
-const supplierRel = supplierColId ? cvRelation(cv, supplierColId) : { text: "", ids: [] };
+      const cv = Object.fromEntries((si.column_values || []).map(c => [c.id, c]));
+      const supplier = supplierColId ? cvRelation(cv, supplierColId) : { text: "", ids: [] };
 
-let supplierText = String(supplierRel.text || "").trim();
-if (!supplierText && Array.isArray(supplierRel.ids) && supplierRel.ids.length) {
-  const names = await getItemNamesByIds(supplierRel.ids);
-  supplierText = names.join(", ");
-}
-
-const materialTitle = (cvText(cv, titleColId) || "").trim();
-
-rows.push({
-  id: it.id,
-  name: materialTitle || nm,
-  rawName: nm,
-  materialTitle,
-  notes: notesColId ? cvText(cv, notesColId) : "",
-  status: pickStatus(cv),
-  supplier: supplierText || "",
-  supplierIds: supplierRel.ids || [],
-});
-
-} // ✅ CLOSE LOOP HERE
-
-console.log("getMaterialsForJob: MAIN SCOPE → subitems rows:", rows.length);
-return rows.length
-  ? {
-      mode: "Include Main Scope Materials",
-      byStatus: groupByStatus(rows),
-      byStatusSupplier: groupByStatusThenSupplier(rows),
+      rows.push({
+        id: si.id,
+        name: nm,
+        title: cvText(cv, titleColId),
+        notes: notesColId ? cvText(cv, notesColId) : "",
+        status: pickStatus(cv),
+        supplier: supplier.text || "",
+        supplierIds: supplier.ids || [],
+      });
     }
-  : null;
-}
+
+    console.log("getMaterialsForJob: MAIN SCOPE → subitems rows:", rows.length);
+    return rows.length ? { mode: "Include Main Scope Materials", byStatus: groupByStatus(rows) } : null;
+  }
+
+  console.log("getMaterialsForJob: status did not match any mode", { jobNumRaw, matScopeStatus });
+  return null;
 }
 // ---------- debug ----------
 app.get("/debug/ping", (_req, res) => res.json({ ok: true, t: Date.now() }));
