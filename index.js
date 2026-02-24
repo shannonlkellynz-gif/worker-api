@@ -368,7 +368,7 @@ async function fetchTaPdfBufferForSubitem(subitemId) {
     jobNumRaw = String(cv?.text || "").trim();
   }
   if (!jobNumRaw) {
-    const m = String(jobSub.name || "").match(/\b\d{4}(?:-\d)?\b/);
+    const m = String(jobSub.name || "").match(/\b\d{4}(?:-\d+)?\b/);
     jobNumRaw = m ? m[0] : "";
   }
 
@@ -1105,7 +1105,7 @@ app.get("/debug/push-tokens", (_req, res) => {
 });
 
 /** ----------------- Materials + H&S helpers ----------------- */
-const SUBTOKEN_RE = /\b\d{4}-\d\b/;      // e.g. 2762-5
+const SUBTOKEN_RE = /\b\d{4}-\d+\b/;     // e.g. 2762-5, 2418-10
 const MAINTOKEN_RE = /\b(\d{4})\b/;      // e.g. 2762
 
 function splitJobTokens(jobNumRaw) {
@@ -2171,7 +2171,7 @@ app.get("/jobs/:subitemId/details-fast", async (req, res) => {
     ).trim();
 
     if (!jobNumber) {
-      const m = String(item.name || "").match(/\b\d{4}(?:-\d)?\b/);
+      const m = String(item.name || "").match(/\b\d{4}(?:-\d+)?\b/);
       jobNumber = m ? m[0] : "";
     }
 
@@ -2231,7 +2231,7 @@ app.get("/jobs/:subitemId/details2", async (req, res) => {
     // Job number: prefer configured column, else extract from subitem name (e.g. "2762-5" or "2762")
     let jobNumRaw = (cvMap[SUBITEMS_JOBNUMBER_COLUMN_ID]?.text || "").trim();
     if (!jobNumRaw) {
-      const m = String(item.name || "").match(/\b\d{4}(?:-\d)?\b/);
+      const m = String(item.name || "").match(/\b\d{4}(?:-\d+)?\b/);
       jobNumRaw = m ? m[0] : "";
     }
 
@@ -2395,7 +2395,7 @@ app.get("/hs/by-subitem/:subitemId", async (req, res) => {
       jobNumRaw = String(cv?.text || "").trim();
     }
     if (!jobNumRaw) {
-      const m = String(jobSub.name || "").match(/\b\d{4}(?:-\d)?\b/);
+      const m = String(jobSub.name || "").match(/\b\d{4}(?:-\d+)?\b/);
       jobNumRaw = m ? m[0] : "";
     }
 
@@ -2871,7 +2871,7 @@ const assignedContractorIds = contractorIds;
     jobNumber = dJobNo?.items?.[0]?.column_values?.[0]?.text || "";
     if (!jobNumber) {
       const nm = dJobNo?.items?.[0]?.name || "";
-      const m = String(nm).match(/\b\d{4}(?:-\d)?\b/);
+      const m = String(nm).match(/\b\d{4}(?:-\d+)?\b/);
       jobNumber = m ? m[0] : "";
     }
   }
@@ -2997,7 +2997,7 @@ app.all("/monday/webhook", express.json({ type: "*/*" }), async (req, res) => {
 
   // Fallback: try to pull 4-digit or 4-digit-dash-sub from the item name
   if (!jobNumber && jobName) {
-    const m = String(jobName).match(/\b\d{4}(?:-\d)?\b/);
+    const m = String(jobName).match(/\b\d{4}(?:-\d+)?\b/);
     if (m) jobNumber = m[0];
   }
 
