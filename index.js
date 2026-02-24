@@ -1535,15 +1535,8 @@ return rows.length
       byStatusSupplier: groupByStatusThenSupplier(rows),
     }
   : null;
-
- console.log("getMaterialsForJob: MAIN SCOPE → subitems rows:", rows.length);
-return rows.length
-  ? {
-      mode: "Include Main Scope Materials",
-      byStatus: groupByStatus(rows),
-      byStatusSupplier: groupByStatusThenSupplier(rows),
-    }
-  : null;
+}
+}
 // ---------- debug ----------
 app.get("/debug/ping", (_req, res) => res.json({ ok: true, t: Date.now() }));
 app.get("/debug/env-safe", (_req, res) => {
