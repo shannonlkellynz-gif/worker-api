@@ -211,7 +211,19 @@ async function getContractorNameById(contractorId) {
   const d = await monday(q, { ids: [String(contractorId)] });
   return String(d?.items?.[0]?.name || "").trim();
 }
+async function getItemNamesByIds(ids = []) {
+  const clean = Array.from(new Set((ids || []).map(String).filter(Boolean)));
+  if (!clean.length) return [];
 
+  const q = `
+    query($ids:[ID!]) {
+      items(ids:$ids) { id name }
+    }`;
+  const d = await monday(q, { ids: clean });
+  return (d?.items || [])
+    .map((it) => String(it?.name || "").trim())
+    .filter(Boolean);
+}
 function cleanPin4(pinRaw) {
   return String(pinRaw || "").replace(/\D/g, "").padStart(4, "0").slice(0, 4);
 }
@@ -1124,6 +1136,18 @@ function groupByStatus(rows) {
   }
   return byStatus;
 }
+function groupByStatusThenSupplier(rows) {
+  const out = {};
+  for (const r of rows) {
+    const status = r.status || "Uncategorised";
+    const supplier = String(r.supplier || "No supplier").trim() || "No supplier";
+
+    if (!out[status]) out[status] = {};
+    if (!out[status][supplier]) out[status][supplier] = [];
+    out[status][supplier].push(r);
+  }
+  return out;
+}
 
 // Pull a Link column's real URL (value.url), or fall back to text
 function cvUrl(cvs, id) {
@@ -1389,22 +1413,39 @@ async function getMaterialsForJob(jobNumRaw, matScopeStatus) {
         if (!nm.startsWith(subToken)) continue; // strict startsWith: "2788-2..."
 
         const cv = Object.fromEntries((it.column_values || []).map(c => [c.id, c]));
-        const supplier = supplierColId ? cvRelation(cv, supplierColId) : { text: "", ids: [] };
+        const supplierRel = supplierColId ? cvRelation(cv, supplierColId) : { text: "", ids: [] };
 
-        rows.push({
-          id: it.id,
-          name: nm,
-          title: cvText(cv, titleColId),
-          notes: notesColId ? cvText(cv, notesColId) : "",
-          status: pickStatus(cv),
-          supplier: supplier.text || "",
-          supplierIds: supplier.ids || [],
-        });
+let supplierText = String(supplierRel.text || "").trim();
+if (!supplierText && Array.isArray(supplierRel.ids) && supplierRel.ids.length) {
+  const names = await getItemNamesByIds(supplierRel.ids);
+  supplierText = names.join(", ");
+}
+
+rows.push({
+  id: it.id,
+  name: nm,
+
+  // ✅ keep material title as data (not the header label)
+  materialTitle: cvText(cv, titleColId),
+
+  notes: notesColId ? cvText(cv, notesColId) : "",
+  status: pickStatus(cv),
+
+  // ✅ supplier becomes the grouping header
+  supplier: supplierText || "",
+  supplierIds: supplierRel.ids || [],
+});
       }
     } while (cursor);
 
     console.log("getMaterialsForJob: ONLY SUB → rows:", rows.length);
-    return rows.length ? { mode: "Only Sub Task Materials", byStatus: groupByStatus(rows) } : null;
+    return rows.length
+  ? {
+      mode: "Only Sub Task Materials",
+      byStatus: groupByStatus(rows), // ✅ existing (do not break app)
+      byStatusSupplier: groupByStatusThenSupplier(rows), // ✅ new nested grouping
+    }
+  : null;
   }
 
   // CASE B: Include Main Scope Materials
@@ -1466,21 +1507,37 @@ async function getMaterialsForJob(jobNumRaw, matScopeStatus) {
       if (nm.startsWith(`${mainToken}-`)) continue; // exclude explicit subjob-specific subitems
 
       const cv = Object.fromEntries((si.column_values || []).map(c => [c.id, c]));
-      const supplier = supplierColId ? cvRelation(cv, supplierColId) : { text: "", ids: [] };
+     const supplierRel = supplierColId ? cvRelation(cv, supplierColId) : { text: "", ids: [] };
 
-      rows.push({
-        id: si.id,
-        name: nm,
-        title: cvText(cv, titleColId),
-        notes: notesColId ? cvText(cv, notesColId) : "",
-        status: pickStatus(cv),
-        supplier: supplier.text || "",
-        supplierIds: supplier.ids || [],
-      });
-    }
+let supplierText = String(supplierRel.text || "").trim();
+if (!supplierText && Array.isArray(supplierRel.ids) && supplierRel.ids.length) {
+  const names = await getItemNamesByIds(supplierRel.ids);
+  supplierText = names.join(", ");
+}
+
+rows.push({
+  id: si.id,
+  name: nm,
+
+  // ✅ keep material title as data (not the header label)
+  materialTitle: cvText(cv, titleColId),
+
+  notes: notesColId ? cvText(cv, notesColId) : "",
+  status: pickStatus(cv),
+
+  // ✅ supplier becomes the grouping header
+  supplier: supplierText || "",
+  supplierIds: supplierRel.ids || [],
+});
 
     console.log("getMaterialsForJob: MAIN SCOPE → subitems rows:", rows.length);
-    return rows.length ? { mode: "Include Main Scope Materials", byStatus: groupByStatus(rows) } : null;
+    return rows.length
+  ? {
+      mode: "Include Main Scope Materials",
+      byStatus: groupByStatus(rows), // ✅ existing (do not break app)
+      byStatusSupplier: groupByStatusThenSupplier(rows), // ✅ new nested grouping
+    }
+  : null;
   }
 
   console.log("getMaterialsForJob: status did not match any mode", { jobNumRaw, matScopeStatus });
