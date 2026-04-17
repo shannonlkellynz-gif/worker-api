@@ -60,6 +60,17 @@ function cacheKeys() {
 const MONDAY_API = "https://api.monday.com/v2";
 const MONDAY_FILE_API = "https://api.monday.com/v2/file";
 
+const TRADE_DIRECTORY_BOARD_ID = "1897457631";
+const TRADE_DIRECTORY_NAME_COLUMN_ID = "name";
+const TRADE_DIRECTORY_COMPANY_COLUMN_ID = "text_mkzr9gw7";
+const TRADE_DIRECTORY_EMAIL_COLUMN_IDS = [
+  "email_mky3d7e4",
+  "email",
+  "email_mkvptjb1",
+];
+const TRADE_DIRECTORY_PRIMARY_PHONE_COLUMN_ID = "phone4nq22rcc";
+const TRADE_DIRECTORY_FALLBACK_PHONE_COLUMN_ID = "text76";
+
 const {
   PORT = "4000",
   MONDAY_TOKEN,
@@ -73,6 +84,7 @@ CONTRACTORS_LOGIN_NAME_COLUMN_ID,
   // Jobs board
   JOBS_BOARD_ID,
   JOBS_ADDRESS_COLUMN_ID,
+  JOBS_DESCRIPTION_COLUMN_ID,
 
   // Subitems (Jobs)
 // Subitems (Jobs)
@@ -1252,6 +1264,18 @@ function cvRelation(cvs, id) {
 }
 async function getHazardRegisterMapByName() {
   if (!HAZARD_REGISTER_BOARD_ID) return {};
+  const cacheKey = `hazardRegisterByName:${HAZARD_REGISTER_BOARD_ID}`;
+  const hit = cacheGet(cacheKey);
+  if (hit) {
+    console.log("[perf] hazard_register_lookup", JSON.stringify({
+      cache: "hit",
+      boardId: HAZARD_REGISTER_BOARD_ID,
+      entries: Object.keys(hit).length,
+      ms: 0,
+    }));
+    return hit;
+  }
+  const t0 = Date.now();
 
   const colIds = [
     HZ_RISK_COL_ID,
@@ -1282,7 +1306,6 @@ async function getHazardRegisterMapByName() {
       boardId: HAZARD_REGISTER_BOARD_ID,
       cursor,
       colIds,
-      _bust: Date.now(),
     });
 
     const page = d?.boards?.[0]?.items_page;
@@ -1305,6 +1328,13 @@ async function getHazardRegisterMapByName() {
     }
   } while (cursor);
 
+  cacheSet(cacheKey, map);
+  console.log("[perf] hazard_register_lookup", JSON.stringify({
+    cache: "miss",
+    boardId: HAZARD_REGISTER_BOARD_ID,
+    entries: Object.keys(map).length,
+    ms: Date.now() - t0,
+  }));
   return map;
 }
 
@@ -1318,9 +1348,22 @@ async function getHazardRegisterMapByName() {
  * and logs debug info so we can see what the server is doing.
  */
 async function getMaterialsForJob(jobNumRaw, matScopeStatus) {
+  const t0 = Date.now();
   if (!matScopeStatus || /no materials/i.test(matScopeStatus)) {
-    console.log("getMaterialsForJob: status says no materials", { jobNumRaw, matScopeStatus });
     return null;
+  }
+
+  const cacheKey = `materials:${jobNumRaw}:${matScopeStatus}`;
+  const hit = cacheGet(cacheKey);
+  if (hit !== null) {
+    console.log("[perf] materials_lookup", JSON.stringify({
+      cache: "hit",
+      jobNumRaw,
+      matScopeStatus,
+      mode: hit?.mode || null,
+      ms: 0,
+    }));
+    return hit;
   }
 
   const { subToken, mainToken } = splitJobTokens(jobNumRaw);
@@ -1335,24 +1378,8 @@ async function getMaterialsForJob(jobNumRaw, matScopeStatus) {
   const statusColId   = SUBITEMS_MAT_NOTES_LONGTEXT_STATUS;        // may be blank
   const supplierColId = SUBITEMS_MAT_SUPPLIER_RELATION_COLUMN_ID;  // relation col
 
-  console.log("getMaterialsForJob DEBUG →", {
-    jobNumRaw,
-    matScopeStatus,
-    wantOnlySub,
-    wantMain,
-    subToken,
-    mainToken,
-    subBoardId,
-    parentBoardId,
-    titleColId,
-    notesColId,
-    statusColId,
-    supplierColId,
-  });
-
   // If we don't even know which columns hold the material title, we can't do much
   if (!titleColId) {
-    console.log("getMaterialsForJob: missing titleColId, aborting");
     return null;
   }
 
@@ -1363,7 +1390,6 @@ async function getMaterialsForJob(jobNumRaw, matScopeStatus) {
   // CASE A: Only Sub Task Materials
   if (wantOnlySub) {
     if (!subToken || !subBoardId) {
-      console.log("getMaterialsForJob: ONLY SUB but missing subToken or subBoardId", { subToken, subBoardId });
       return null;
     }
 
@@ -1403,14 +1429,23 @@ async function getMaterialsForJob(jobNumRaw, matScopeStatus) {
       }
     } while (cursor);
 
-    console.log("getMaterialsForJob: ONLY SUB → rows:", rows.length);
-    return rows.length ? { mode: "Only Sub Task Materials", byStatus: groupByStatus(rows) } : null;
+    const out = rows.length ? { mode: "Only Sub Task Materials", byStatus: groupByStatus(rows) } : null;
+    cacheSet(cacheKey, out);
+    console.log("[perf] materials_lookup", JSON.stringify({
+      cache: "miss",
+      jobNumRaw,
+      matScopeStatus,
+      mode: out?.mode || "Only Sub Task Materials",
+      rows: rows.length,
+      ms: Date.now() - t0,
+    }));
+    return out;
   }
 
   // CASE B: Include Main Scope Materials
   if (wantMain) {
     if (!mainToken || !parentBoardId) {
-      console.log("getMaterialsForJob: MAIN SCOPE but missing mainToken or parentBoardId", { mainToken, parentBoardId });
+      cacheSet(cacheKey, null);
       return null;
     }
 
@@ -1452,10 +1487,6 @@ async function getMaterialsForJob(jobNumRaw, matScopeStatus) {
     } while (cursor && !parent);
 
     if (!parent || !Array.isArray(parent.subitems)) {
-      console.log("getMaterialsForJob: MAIN SCOPE – parent not found or has no subitems", {
-        mainToken,
-        foundParent: !!parent,
-      });
       return null;
     }
 
@@ -1479,11 +1510,27 @@ async function getMaterialsForJob(jobNumRaw, matScopeStatus) {
       });
     }
 
-    console.log("getMaterialsForJob: MAIN SCOPE → subitems rows:", rows.length);
-    return rows.length ? { mode: "Include Main Scope Materials", byStatus: groupByStatus(rows) } : null;
+    const out = rows.length ? { mode: "Include Main Scope Materials", byStatus: groupByStatus(rows) } : null;
+    cacheSet(cacheKey, out);
+    console.log("[perf] materials_lookup", JSON.stringify({
+      cache: "miss",
+      jobNumRaw,
+      matScopeStatus,
+      mode: out?.mode || "Include Main Scope Materials",
+      rows: rows.length,
+      ms: Date.now() - t0,
+    }));
+    return out;
   }
 
-  console.log("getMaterialsForJob: status did not match any mode", { jobNumRaw, matScopeStatus });
+  cacheSet(cacheKey, null);
+  console.log("[perf] materials_lookup", JSON.stringify({
+    cache: "miss",
+    jobNumRaw,
+    matScopeStatus,
+    mode: null,
+    ms: Date.now() - t0,
+  }));
   return null;
 }
 // ---------- debug ----------
@@ -1500,6 +1547,7 @@ CONTRACTORS_LOGIN_NAME_COLUMN_ID,
     // jobs
     JOBS_BOARD_ID,
     JOBS_ADDRESS_COLUMN_ID,
+    JOBS_DESCRIPTION_COLUMN_ID,
     // subitems
     SUBITEMS_CONTRACTOR_COLUMN_ID,
     SUBITEMS_TIMELINE_COLUMN_ID,
@@ -1860,6 +1908,7 @@ const pin4 = cleanPin4(pin);
 // ---------- jobs (cached) ----------
 app.get("/jobs/my", async (req, res) => {
   try {
+    const t0 = Date.now();
     const contractorId = String(req.query.contractorId || "").trim();
     if (!contractorId) {
       return res.status(400).json({ error: "contractorId required" });
@@ -1892,30 +1941,50 @@ const cacheKey = `jobs:${contractorId}:${onDate}:${includeWeekends}:${page}:${li
       return res.status(500).json({ error: "SUBITEMS_ON_DEVICE_STATUS_COLUMN_ID missing in .env" });
     }
 
-    const subCols = [
+    const filterCols = [
       SUBITEMS_TIMELINE_COLUMN_ID,
-      SUBITEMS_JOBNUMBER_COLUMN_ID,
-      SUBITEMS_DESCRIPTION_COLUMN_ID,
-      SUBITEMS_ON_DEVICE_STATUS_COLUMN_ID,        // filter column
-      SUBITEMS_SUBCONTRACTOR_TEXT_COLUMN_ID,      // for matching contractor
+      SUBITEMS_ON_DEVICE_STATUS_COLUMN_ID,
+      SUBITEMS_SUBCONTRACTOR_TEXT_COLUMN_ID,
     ].filter(Boolean);
 
-    const addrCols = [JOBS_ADDRESS_COLUMN_ID].filter(Boolean);
+    const detailCols = [
+      SUBITEMS_JOBNUMBER_COLUMN_ID,
+      SUBITEMS_DESCRIPTION_COLUMN_ID,
+    ].filter(Boolean);
+
+    const parentDescriptionColId = JOBS_DESCRIPTION_COLUMN_ID || "description";
+    const parentCols = [
+      JOBS_ADDRESS_COLUMN_ID,
+      parentDescriptionColId,
+    ].filter(Boolean);
 
     // 1) Pull ONLY subitems where On Device == "On Device"
-const subitemsQ = `
-  query($boardId: ID!, $cursor: String, $subCols: [String!]) {
+    const contractorNameCompareLiteral = JSON.stringify(contractorName || "");
+
+const subitemsFilteredFirstPageQ = `
+  query(
+    $boardId: ID!,
+    $filterCols: [String!],
+    $statusCol: ID!,
+    $contractorCol: ID!
+  ) {
     boards(ids: [$boardId]) {
       items_page(
         limit: 100,
-        cursor: $cursor,
+        query_params: {
+          operator: and,
+          rules: [
+            { column_id: $statusCol, operator: any_of, compare_value: [1] },
+            { column_id: $contractorCol, operator: contains_text, compare_value: [${contractorNameCompareLiteral}] }
+          ]
+        }
       ) {
         cursor
         items {
           id
           name
           parent_item { id }
-          column_values(ids: $subCols) {
+          column_values(ids: $filterCols) {
             id
             text
             value
@@ -1925,23 +1994,132 @@ const subitemsQ = `
     }
   }
 `;
-    // Helper: fetch parent job addresses for ONLY the parents we actually need
-    async function fetchParentAddresses(parentIds = []) {
+
+const subitemsStatusOnlyFirstPageQ = `
+  query(
+    $boardId: ID!,
+    $filterCols: [String!],
+    $statusCol: ID!
+  ) {
+    boards(ids: [$boardId]) {
+      items_page(
+        limit: 100,
+        query_params: {
+          rules: [
+            { column_id: $statusCol, operator: any_of, compare_value: [1] }
+          ]
+        }
+      ) {
+        cursor
+        items {
+          id
+          name
+          parent_item { id }
+          column_values(ids: $filterCols) {
+            id
+            text
+            value
+          }
+        }
+      }
+    }
+  }
+`;
+
+    const nextFilteredSubitemsQ = `
+      query($cursor: String!, $filterCols: [String!]) {
+        next_items_page(limit: 100, cursor: $cursor) {
+          cursor
+          items {
+            id
+            name
+            parent_item { id }
+            column_values(ids: $filterCols) {
+              id
+              text
+              value
+            }
+          }
+        }
+      }
+    `;
+
+    const matchedSubitemsQ = `
+      query($ids:[ID!], $detailCols:[String!]) {
+        items(ids:$ids) {
+          id
+          column_values(ids:$detailCols) {
+            id
+            text
+            value
+          }
+        }
+      }
+    `;
+    // Helper: fetch parent job meta for ONLY the parents we actually need
+    async function fetchParentMeta(parentIds = []) {
       const ids = Array.from(new Set((parentIds || []).map(String).filter(Boolean)));
-      if (!ids.length || !addrCols.length) return {};
+      if (!ids.length || !parentCols.length) return {};
+
+      const map = {};
+      const missingIds = [];
+
+      for (const id of ids) {
+        const hit = cacheGet(`jobParentMeta:${id}`);
+        if (hit) {
+          map[id] = hit;
+        } else {
+          missingIds.push(id);
+        }
+      }
+
+      if (!missingIds.length) return map;
 
       const qParents = `
-        query($ids:[ID!], $addrCols:[String!]) {
+        query($ids:[ID!], $parentCols:[String!]) {
           items(ids: $ids) {
             id
-            column_values(ids:$addrCols) { id text }
+            name
+            column_values(ids:$parentCols) { id text value }
           }
         }`;
 
-      const d = await monday(qParents, { ids, addrCols });
-      const map = {};
+      const d = await monday(qParents, { ids: missingIds, parentCols });
+      const cvBestText = (cv) => {
+        if (!cv) return "";
+        const t = String(cv.text || "").trim();
+        if (t) return t;
+        try {
+          const v = typeof cv.value === "string" ? JSON.parse(cv.value) : cv.value;
+          const vt = String(v?.text || "").trim();
+          return vt || "";
+        } catch {
+          return "";
+        }
+      };
       for (const it of (d?.items || [])) {
-        map[String(it.id)] = it?.column_values?.[0]?.text || "";
+        const cvMap = Object.fromEntries(
+          (it?.column_values || []).map((cv) => [cv.id, cv])
+        );
+        const meta = {
+          parentJobName: String(it?.name || "").trim(),
+          address: cvBestText(cvMap[JOBS_ADDRESS_COLUMN_ID]),
+          parentDescription: cvBestText(cvMap[parentDescriptionColId]),
+        };
+        map[String(it.id)] = meta;
+        cacheSet(`jobParentMeta:${String(it.id)}`, meta);
+      }
+
+      for (const id of missingIds) {
+        if (!map[id]) {
+          const emptyMeta = {
+            parentJobName: "",
+            address: "",
+            parentDescription: "",
+          };
+          map[id] = emptyMeta;
+          cacheSet(`jobParentMeta:${id}`, emptyMeta);
+        }
       }
       return map;
     }
@@ -1957,33 +2135,54 @@ const subitemsQ = `
 let totalPossible = 0;
 let collected = 0;
 const results = [];
+let parentMetaMs = 0;
+const tSubitemScan = Date.now();
 
 do {
-  const d = await monday(subitemsQ, {
-    boardId: SUBITEMS_BOARD_ID,
-    cursor,
-    subCols,
-  });
+  const useContractorServerFilter =
+    !!contractorName &&
+    !!SUBITEMS_SUBCONTRACTOR_TEXT_COLUMN_ID;
 
-  const itemsPage = d?.boards?.[0]?.items_page;
+  const d = cursor
+    ? await monday(nextFilteredSubitemsQ, {
+        cursor,
+        filterCols,
+      })
+    : await monday(
+        useContractorServerFilter
+          ? subitemsFilteredFirstPageQ
+          : subitemsStatusOnlyFirstPageQ,
+        useContractorServerFilter
+          ? {
+              boardId: SUBITEMS_BOARD_ID,
+              filterCols,
+              statusCol: SUBITEMS_ON_DEVICE_STATUS_COLUMN_ID,
+              contractorCol: SUBITEMS_SUBCONTRACTOR_TEXT_COLUMN_ID,
+            }
+          : {
+              boardId: SUBITEMS_BOARD_ID,
+              filterCols,
+              statusCol: SUBITEMS_ON_DEVICE_STATUS_COLUMN_ID,
+            }
+      );
+
+  const itemsPage = cursor
+    ? d?.next_items_page
+    : d?.boards?.[0]?.items_page;
   cursor = itemsPage?.cursor || null;
 
   const items = itemsPage?.items || [];
   if (!items.length) continue;
 
-  // Already filtered by query_params above
-const onDeviceItems = items.filter((it) => {
-  const cv = (it.column_values || []).find(
-    (c) => c.id === SUBITEMS_ON_DEVICE_STATUS_COLUMN_ID
-  );
-  return String(cv?.text || "").trim() === "On Device";
-});
-if (!onDeviceItems.length) continue;
+  const selected = [];
 
-  const pending = [];
-
-  for (const s of onDeviceItems) {
+  for (const s of items) {
     const sCols = Object.fromEntries((s.column_values || []).map((cv) => [cv.id, cv]));
+
+    const onDevice = String(
+      sCols[SUBITEMS_ON_DEVICE_STATUS_COLUMN_ID]?.text || ""
+    ).trim();
+    if (onDevice !== "On Device") continue;
 
     const subTxt = String(sCols[SUBITEMS_SUBCONTRACTOR_TEXT_COLUMN_ID]?.text || "").trim();
 
@@ -2008,17 +2207,10 @@ if (!onDeviceItems.length) continue;
     totalPossible++;
 
     if (totalPossible > offset && collected < limit) {
-      const parentId = String(s?.parent_item?.id || "");
-
-      pending.push({ 
-
-        parentId,
-        parentJobId: parentId,
-        parentJobName: s?.parent_item?.name || "",
-        subitemId: s.id,
+      selected.push({
+        parentId: String(s?.parent_item?.id || ""),
+        subitemId: String(s.id),
         subitemName: s.name,
-        jobNumber: sCols[SUBITEMS_JOBNUMBER_COLUMN_ID]?.text || "",
-        description: sCols[SUBITEMS_DESCRIPTION_COLUMN_ID]?.text || "",
         timeline: { startDate, endDate },
       });
 
@@ -2031,19 +2223,66 @@ if (!onDeviceItems.length) continue;
     }
   }
 
+  const selectedIds = selected.map((s) => s.subitemId).filter(Boolean);
+  const selectedMetaById = {};
+
+  if (selectedIds.length && detailCols.length) {
+    const dDetails = await monday(matchedSubitemsQ, {
+      ids: selectedIds,
+      detailCols,
+    });
+
+    for (const it of (dDetails?.items || [])) {
+      const cvMap = Object.fromEntries(
+        (it.column_values || []).map((cv) => [cv.id, cv])
+      );
+      selectedMetaById[String(it.id)] = {
+        jobNumber: cvMap[SUBITEMS_JOBNUMBER_COLUMN_ID]?.text || "",
+        description: cvMap[SUBITEMS_DESCRIPTION_COLUMN_ID]?.text || "",
+      };
+    }
+  }
+
+  const pending = selected.map((s) => ({
+    parentId: s.parentId,
+    parentJobId: s.parentId,
+    parentJobName: "",
+    subitemId: s.subitemId,
+    subitemName: s.subitemName,
+    jobNumber: selectedMetaById[s.subitemId]?.jobNumber || "",
+    description: selectedMetaById[s.subitemId]?.description || "",
+    timeline: s.timeline,
+  }));
+
   const neededParentIds = pending.map((p) => p.parentId).filter(Boolean);
-  const addressByParentId = await fetchParentAddresses(neededParentIds);
+  const tParentMeta = Date.now();
+  const parentMetaByParentId = await fetchParentMeta(neededParentIds);
+  parentMetaMs += Date.now() - tParentMeta;
 
   for (const p of pending) {
     results.push({
       ...p,
-      address: addressByParentId[p.parentId] || "",
+      parentJobName: parentMetaByParentId[p.parentId]?.parentJobName || p.parentJobName || "",
+      address: parentMetaByParentId[p.parentId]?.address || "",
+      parentDescription: parentMetaByParentId[p.parentId]?.parentDescription || "",
     });
   }
 } while (cursor);
 
 const out = { items: results, total: totalPossible, page, limit };
 cacheSet(cacheKey, out);
+console.log("[perf] jobs_my", JSON.stringify({
+  contractorId,
+  onDate,
+  includeWeekends,
+  page,
+  limit,
+  items: results.length,
+  totalPossible,
+  subitemScanMs: Date.now() - tSubitemScan,
+  parentMetaMs,
+  totalMs: Date.now() - t0,
+}));
 return res.json(out);
 
   } catch (e) {
@@ -2057,7 +2296,8 @@ app.get("/jobs/:subitemId/details", async (req, res) => {
   const subitemId = String(req.params.subitemId);
   const fileColumnIds = getFileColumnIds();
   const cacheKey = `jobDetails:${subitemId}:${fileColumnIds.join(",")}`;
-  const hit = cacheGet(cacheKey);
+  const force = String(req.query.force || "") === "1";
+  const hit = force ? null : cacheGet(cacheKey);
   if (hit) return res.json(hit);
 
   try {
@@ -2121,6 +2361,10 @@ app.get("/jobs/:subitemId/details", async (req, res) => {
 app.get("/jobs/:subitemId/details-fast", async (req, res) => {
   try {
     const subitemId = String(req.params.subitemId).trim();
+    const force = String(req.query.force || "") === "1";
+    const cacheKey = `jobDetailsFast:${subitemId}`;
+    const hit = force ? null : cacheGet(cacheKey);
+    if (hit) return res.json(hit);
 
     const q = `
       query($id:[ID!], $colIds:[String!]!) {
@@ -2142,29 +2386,38 @@ app.get("/jobs/:subitemId/details-fast", async (req, res) => {
     const item = d?.items?.[0];
 
     if (!item) {
-      return res.json({
+      const out = {
         scope: "",
         timeAllowance: "",
         jobNumber: "",
         matScopeStatus: "",
-      });
+      };
+      cacheSet(cacheKey, out);
+      return res.json(out);
     }
 
     const cvMap = Object.fromEntries(
       (item.column_values || []).map(cv => [cv.id, cv])
     );
 
-    const scope = String(
-      cvMap[SUBITEMS_SCOPE_LONGTEXT_COLUMN_ID]?.text || ""
-    ).trim();
+    function cvBestText(cv) {
+      if (!cv) return "";
+      const t = String(cv.text || "").trim();
+      if (t) return t;
+      try {
+        const v = typeof cv.value === "string" ? JSON.parse(cv.value) : cv.value;
+        const vt = String(v?.text || "").trim();
+        return vt || "";
+      } catch {
+        return "";
+      }
+    }
 
-    const timeAllowance = String(
-      cvMap[TIME_ALLOWANCE_COLUMN_ID]?.text || ""
-    ).trim();
+    const scope = cvBestText(cvMap[SUBITEMS_SCOPE_LONGTEXT_COLUMN_ID]);
 
-    const matScopeStatus = String(
-      cvMap[SUBITEMS_MATS_SCOPE_STATUS_COLUMN_ID]?.text || ""
-    ).trim();
+    const timeAllowance = cvBestText(cvMap[TIME_ALLOWANCE_COLUMN_ID]);
+
+    const matScopeStatus = cvBestText(cvMap[SUBITEMS_MATS_SCOPE_STATUS_COLUMN_ID]);
 
     let jobNumber = String(
       cvMap[SUBITEMS_JOBNUMBER_COLUMN_ID]?.text || ""
@@ -2175,8 +2428,225 @@ app.get("/jobs/:subitemId/details-fast", async (req, res) => {
       jobNumber = m ? m[0] : "";
     }
 
-    return res.json({ scope, timeAllowance, jobNumber, matScopeStatus });
+    const out = { scope, timeAllowance, jobNumber, matScopeStatus };
+    cacheSet(cacheKey, out);
+    return res.json(out);
 
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Server error" });
+  }
+});
+
+app.get("/jobs/:subitemId/siblings", async (req, res) => {
+  try {
+    const subitemId = String(req.params.subitemId || "").trim();
+    const force = String(req.query.force || "") === "1";
+    const cacheKey = `jobSiblings:v2:${subitemId}`;
+    const hit = force ? null : cacheGet(cacheKey);
+    if (hit) return res.json(hit);
+
+    const qCurrent = `
+      query($id:[ID!]) {
+        items(ids:$id) {
+          id
+          parent_item { id }
+        }
+      }`;
+
+    const dCurrent = await monday(qCurrent, { id: [subitemId] });
+    const currentItem = dCurrent?.items?.[0];
+    const parentId = String(currentItem?.parent_item?.id || "").trim();
+
+    if (!currentItem || !parentId) {
+      const out = { parentId: "", currentSubitemId: subitemId, items: [] };
+      cacheSet(cacheKey, out);
+      return res.json(out);
+    }
+
+    const siblingColIds = [
+      SUBITEMS_SUBCONTRACTOR_TEXT_COLUMN_ID,
+      SUBITEMS_DESCRIPTION_COLUMN_ID,
+      SUBITEMS_TIMELINE_COLUMN_ID,
+      SUBITEMS_SCOPE_LONGTEXT_COLUMN_ID,
+      SUBITEMS_EMAIL_COLUMN_ID,
+    ].filter(Boolean);
+
+    function cvBestText(cv) {
+      if (!cv) return "";
+      const t = String(cv.text || "").trim();
+      if (t) return t;
+      try {
+        const v = typeof cv.value === "string" ? JSON.parse(cv.value) : cv.value;
+        const vt = String(v?.text || "").trim();
+        return vt || "";
+      } catch {
+        return "";
+      }
+    }
+
+    const normExact = (s) =>
+      String(s || "")
+        .toLowerCase()
+        .trim()
+        .replace(/\s+/g, " ");
+
+    const directoryCacheKey = `tradeDirectory:${TRADE_DIRECTORY_BOARD_ID}`;
+    async function getTradeDirectory() {
+      const hit = cacheGet(directoryCacheKey);
+      if (hit) return hit;
+
+      const colIds = [
+        TRADE_DIRECTORY_COMPANY_COLUMN_ID,
+        TRADE_DIRECTORY_PRIMARY_PHONE_COLUMN_ID,
+        TRADE_DIRECTORY_FALLBACK_PHONE_COLUMN_ID,
+        ...TRADE_DIRECTORY_EMAIL_COLUMN_IDS,
+      ].filter(Boolean);
+
+      const qDirectory = `
+        query($boardId: ID!, $cursor: String, $colIds: [String!]) {
+          boards(ids: [$boardId]) {
+            items_page(limit: 100, cursor: $cursor) {
+              cursor
+              items {
+                id
+                name
+                column_values(ids: $colIds) { id text value }
+              }
+            }
+          }
+        }`;
+
+      const byEmail = new Map();
+      const byName = new Map();
+      const byCompany = new Map();
+
+      const addUnique = (map, key, row) => {
+        if (!key) return;
+        const arr = map.get(key) || [];
+        arr.push(row);
+        map.set(key, arr);
+      };
+
+      let cursor = null;
+      do {
+        const dDir = await monday(qDirectory, {
+          boardId: TRADE_DIRECTORY_BOARD_ID,
+          cursor,
+          colIds,
+        });
+        const page = dDir?.boards?.[0]?.items_page;
+        cursor = page?.cursor || null;
+
+        for (const it of page?.items || []) {
+          const cvMap = Object.fromEntries((it.column_values || []).map((cv) => [cv.id, cv]));
+          const row = {
+            id: String(it.id || ""),
+            name: String(it.name || "").trim(),
+            companyName: cvBestText(cvMap[TRADE_DIRECTORY_COMPANY_COLUMN_ID]),
+            phone:
+              cvBestText(cvMap[TRADE_DIRECTORY_PRIMARY_PHONE_COLUMN_ID]) ||
+              cvBestText(cvMap[TRADE_DIRECTORY_FALLBACK_PHONE_COLUMN_ID]) ||
+              "",
+          };
+
+          const emails = TRADE_DIRECTORY_EMAIL_COLUMN_IDS
+            .map((id) => normExact(cvBestText(cvMap[id])))
+            .filter(Boolean);
+
+          for (const email of emails) addUnique(byEmail, email, row);
+          addUnique(byName, normExact(row.name), row);
+          addUnique(byCompany, normExact(row.companyName), row);
+        }
+      } while (cursor);
+
+      const out = { byEmail, byName, byCompany };
+      cacheSet(directoryCacheKey, out);
+      return out;
+    }
+
+    const pickSingle = (arr) => (Array.isArray(arr) && arr.length === 1 ? arr[0] : null);
+
+    const qParent = `
+      query($id:[ID!], $colIds:[String!]) {
+        items(ids:$id) {
+          id
+          subitems {
+            id
+            name
+            column_values(ids:$colIds) { id text value }
+          }
+        }
+      }`;
+
+    const dParent = await monday(qParent, { id: [parentId], colIds: siblingColIds });
+    const parentItem = dParent?.items?.[0];
+    const tradeDirectory = await getTradeDirectory();
+
+    const parseTimeline = (cv) => {
+      try {
+        const raw = cv?.value;
+        if (!raw) return { startDate: "", endDate: "" };
+        const v = typeof raw === "string" ? JSON.parse(raw) : raw;
+        const startDate = String(v?.from || "").trim();
+        const endDate = String(v?.to || v?.from || "").trim();
+        return { startDate, endDate };
+      } catch {
+        return { startDate: "", endDate: "" };
+      }
+    };
+
+    const compareTimeline = (a, b) => {
+      const aStart = a.timeline?.startDate || "";
+      const bStart = b.timeline?.startDate || "";
+      const aEnd = a.timeline?.endDate || aStart || "";
+      const bEnd = b.timeline?.endDate || bStart || "";
+
+      if (aStart && !bStart) return -1;
+      if (!aStart && bStart) return 1;
+      if (aStart !== bStart) return aStart.localeCompare(bStart);
+      if (aEnd !== bEnd) return aEnd.localeCompare(bEnd);
+      return String(a.name || a.subitemId).localeCompare(String(b.name || b.subitemId));
+    };
+
+    const items = (parentItem?.subitems || [])
+      .map((si) => {
+        const cvMap = Object.fromEntries((si.column_values || []).map((cv) => [cv.id, cv]));
+        return {
+          phone:
+            (() => {
+              const emailKey = normExact(cvBestText(cvMap[SUBITEMS_EMAIL_COLUMN_ID]));
+              const supplierKey = normExact(cvBestText(cvMap[SUBITEMS_SUBCONTRACTOR_TEXT_COLUMN_ID]));
+
+              const emailMatch = emailKey ? pickSingle(tradeDirectory.byEmail.get(emailKey)) : null;
+              if (emailMatch?.phone) return emailMatch.phone;
+
+              const nameMatch = supplierKey ? pickSingle(tradeDirectory.byName.get(supplierKey)) : null;
+              if (nameMatch?.phone) return nameMatch.phone;
+
+              const companyMatch = supplierKey ? pickSingle(tradeDirectory.byCompany.get(supplierKey)) : null;
+              if (companyMatch?.phone) return companyMatch.phone;
+
+              return "";
+            })(),
+          subitemId: String(si.id || ""),
+          name: String(si.name || "").trim(),
+          isCurrent: String(si.id || "") === subitemId,
+          subcontractorName: cvBestText(cvMap[SUBITEMS_SUBCONTRACTOR_TEXT_COLUMN_ID]) || "Unassigned",
+          description: cvBestText(cvMap[SUBITEMS_DESCRIPTION_COLUMN_ID]) || "No description",
+          scope: cvBestText(cvMap[SUBITEMS_SCOPE_LONGTEXT_COLUMN_ID]),
+          contact: cvBestText(cvMap[SUBITEMS_EMAIL_COLUMN_ID]),
+          timeline: parseTimeline(cvMap[SUBITEMS_TIMELINE_COLUMN_ID]),
+        };
+      })
+      .sort(compareTimeline);
+
+    const out = {
+      parentId,
+      currentSubitemId: subitemId,
+      items,
+    };
+    cacheSet(cacheKey, out);
+    return res.json(out);
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Server error" });
   }
@@ -2185,7 +2655,12 @@ app.get("/jobs/:subitemId/details-fast", async (req, res) => {
 // ---------- details+HS+materials in one shot ----------
 app.get("/jobs/:subitemId/details2", async (req, res) => {
   try {
+    const t0 = Date.now();
     const subitemId = String(req.params.subitemId).trim();
+    const force = String(req.query.force || "") === "1";
+    const cacheKey = `jobDetails2:${subitemId}`;
+    const hit = force ? null : cacheGet(cacheKey);
+    if (hit) return res.json(hit);
 
     // 1) Pull Job subitem for: scope text, job number, materials-scope status, time allowance
     const qSub = `
@@ -2205,9 +2680,15 @@ app.get("/jobs/:subitemId/details2", async (req, res) => {
       TIME_ALLOWANCE_COLUMN_ID,
     ].filter(Boolean);
 
+    const tSubFetch = Date.now();
     const dSub = await monday(qSub, { id: [subitemId], colIds });
+    const subitemFetchMs = Date.now() - tSubFetch;
     const item = dSub?.items?.[0];
-    if (!item) return res.json({ scope: "", timeAllowance: "", hs: null, materials: null });
+    if (!item) {
+      const out = { scope: "", timeAllowance: "", hs: null, materials: null };
+      cacheSet(cacheKey, out);
+      return res.json(out);
+    }
 
     const cvMap = Object.fromEntries((item.column_values || []).map((cv) => [cv.id, cv]));
 
@@ -2237,47 +2718,66 @@ app.get("/jobs/:subitemId/details2", async (req, res) => {
 
     const { subToken, mainToken } = splitJobTokens(jobNumRaw);
     const matScopeStatus = (cvMap[SUBITEMS_MATS_SCOPE_STATUS_COLUMN_ID]?.text || "").trim();
+    const materialsPromise = getMaterialsForJob(jobNumRaw, matScopeStatus);
+    let hsLookupMs = 0;
 
     // 2) H&S (pull filled fields + hazards subitems)
     let hs = null;
 
     if (HS_BOARD_ID && HS_PDF_URL_COLUMN_ID) {
-      const qHS = `
+      const tHsLookup = Date.now();
+      const qHSFind = `
         query($boardId: ID!, $cursor: String) {
           boards(ids: [$boardId]) {
             items_page(limit: 100, cursor: $cursor) {
               cursor
-              items {
-                id
-                name
-                column_values { id text type value }
-subitems {
-  id
-  name
-column_values { id text type value }
-}
-              }
+              items { id name }
             }
           }
         }`;
 
       let cursor = null;
       const wantPrefix = subToken || mainToken;
+      let hsItemId = null;
 
       if (wantPrefix) {
         do {
-          const dHS = await monday(qHS, { boardId: HS_BOARD_ID, cursor, _bust: Date.now() });
+          const dHS = await monday(qHSFind, { boardId: HS_BOARD_ID, cursor });
           const page = dHS?.boards?.[0]?.items_page;
           cursor = page?.cursor || null;
 
           for (const it of page?.items || []) {
             const nm = String(it.name || "").trim();
             if (!nm.startsWith(wantPrefix)) continue;
+            hsItemId = String(it.id);
+            cursor = null;
+            break;
+          }
+        } while (cursor && !hsItemId);
 
-            const cvs = Object.fromEntries((it.column_values || []).map((cv) => [cv.id, cv]));
+        if (hsItemId) {
+          const qHSFull = `
+            query($id:[ID!]) {
+              items(ids:$id) {
+                id
+                name
+                column_values { id text type value }
+                subitems {
+                  id
+                  name
+                  column_values { id text type value }
+                }
+              }
+            }`;
+
+          const dHSFull = await monday(qHSFull, { id: [hsItemId] });
+          const hsItem = dHSFull?.items?.[0];
+
+          if (hsItem) {
+            const cvs = Object.fromEntries((hsItem.column_values || []).map((cv) => [cv.id, cv]));
             const url = cvUrl(cvs, HS_PDF_URL_COLUMN_ID);
 
-            const fields = (it.column_values || [])
+            const fields = (hsItem.column_values || [])
               .filter((cv) => !HS_FIELDS_EXCLUDE.has(cv.id))
               .map((cv) => {
                 const label = HS_FIELD_LABELS[cv.id] || cv.id;
@@ -2286,59 +2786,40 @@ column_values { id text type value }
               })
               .filter(Boolean);
 
+            const hazardRegisterByName = await getHazardRegisterMapByName();
+            const HAZARD_TITLE_COL_ID = "text_mkvkjfvh";
 
-const hazardRegisterByName = await getHazardRegisterMapByName(); // norm(name) -> details
+            const hazards = (hsItem.subitems || []).map((si) => {
+              const siCv = Object.fromEntries((si.column_values || []).map((c) => [c.id, c]));
+              const hazardTitle = (cvText(siCv, HAZARD_TITLE_COL_ID) || "").trim() || String(si.name || "").trim();
+              const key = norm(hazardTitle);
+              const reg = hazardRegisterByName[key] || null;
+              return {
+                id: si.id,
+                name: hazardTitle,
+                title: hazardTitle,
+                hazard: hazardTitle,
+                sections: [
+                  { label: "Hazard", value: hazardTitle },
+                  { label: "Risks", value: reg?.risks || "" },
+                  { label: "Initial Risk", value: reg?.initialRisk || "" },
+                  { label: "Controls", value: reg?.controls || "" },
+                  { label: "Residual Risk", value: reg?.postRisk || "" },
+                ],
+                hazardRegisterItemId: reg?.id || "",
+              };
+            });
 
-// This is the column on the H&S subitems that contains the hazard title (e.g. "Battery Tools")
-const HAZARD_TITLE_COL_ID = "text_mkvkjfvh";
-
-const hazards = (it.subitems || []).map((si) => {
-  // Build a cv map for this H&S hazard subitem
-  const siCv = Object.fromEntries((si.column_values || []).map((c) => [c.id, c]));
-
-  // ✅ Pull the actual hazard title from the column, NOT the subitem name ("1", "2", etc)
-  const hazardTitle = (cvText(siCv, HAZARD_TITLE_COL_ID) || "").trim() || String(si.name || "").trim();
-
-  // Lookup in Hazard Register (board 1889935521)
-  const key = norm(hazardTitle);
-  const reg = hazardRegisterByName[key] || null;
-return {
-  id: si.id,
-
-  // ✅ add these back for the app UI
-  name: hazardTitle,
-  title: hazardTitle,
-  hazard: hazardTitle,
-
-  sections: [
-    { label: "Hazard", value: hazardTitle },
-    { label: "Risks", value: reg?.risks || "" },
-    { label: "Initial Risk", value: reg?.initialRisk || "" },
-    { label: "Controls", value: reg?.controls || "" },
-    { label: "Residual Risk", value: reg?.postRisk || "" },
-  ],
-  hazardRegisterItemId: reg?.id || "",
-};
-});
-
-// Drop hazards that are effectively blank (no title + no useful data)
-const hazardsClean = hazards.filter((h) => {
-  const hazardTitle =
-    (h.sections || []).find((s) => s.label === "Hazard")?.value ||
-    h.title ||
-    h.name ||
-    h.hazard ||
-    "";
-
-  const hasAnyDetail = (h.sections || []).some((s) => String(s?.value || "").trim().length > 0);
-
-  return String(hazardTitle).trim().length > 0 && hasAnyDetail;
-});
-console.log("HS hazards count:", hazardsClean.length);
-console.log("HS hazard sample:", hazardsClean[0]);
-
-// IMPORTANT: return the cleaned hazards
-// (If you already reference `hazards` below, change that reference to `hazardsClean`)
+            const hazardsClean = hazards.filter((h) => {
+              const hazardTitle =
+                (h.sections || []).find((s) => s.label === "Hazard")?.value ||
+                h.title ||
+                h.name ||
+                h.hazard ||
+                "";
+              const hasAnyDetail = (h.sections || []).some((s) => String(s?.value || "").trim().length > 0);
+              return String(hazardTitle).trim().length > 0 && hasAnyDetail;
+            });
 
             hs = {
               job: wantPrefix,
@@ -2346,23 +2827,35 @@ console.log("HS hazard sample:", hazardsClean[0]);
               fields,
               hazards: hazardsClean,
             };
-
-            cursor = null;
-            break;
           }
-        } while (cursor && !hs);
+        }
       }
+      hsLookupMs = Date.now() - tHsLookup;
     }
 
     // 3) Materials
-    const materials = await getMaterialsForJob(jobNumRaw, matScopeStatus);
+    const tMaterialsAwait = Date.now();
+    const materials = await materialsPromise;
+    const materialsAwaitMs = Date.now() - tMaterialsAwait;
 
-    return res.json({
+    const out = {
       scope,
       timeAllowance,
       hs,
       materials,
-    });
+    };
+    cacheSet(cacheKey, out);
+    console.log("[perf] details2", JSON.stringify({
+      subitemId,
+      force,
+      subitemFetchMs,
+      hsLookupMs,
+      materialsAwaitMs,
+      hasHs: !!hs,
+      hasMaterials: !!materials,
+      totalMs: Date.now() - t0,
+    }));
+    return res.json(out);
   } catch (e) {
     console.error("ERROR /jobs/:subitemId/details2:", e);
     return res.status(500).json({ error: e?.message || "Server error" });
