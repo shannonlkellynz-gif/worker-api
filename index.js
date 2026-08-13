@@ -154,14 +154,15 @@ const SUBITEM_ASSIGNMENT_PAIRS = [
     visitNumber: 1,
     timelineColumnId: SUBITEMS_TIMELINE_COLUMN_ID || "timeline",
     workerColumnId: SUBITEMS_SUBCONTRACTOR_TEXT_COLUMN_ID || "text_mkqsq1f7",
+    onDeviceColumnId: SUBITEMS_ON_DEVICE_STATUS_COLUMN_ID || "color_mkxwtxhe",
   },
-  { visitNumber: 2, timelineColumnId: "timerange_mm66nc1j", workerColumnId: "text_mm2g31f4" },
-  { visitNumber: 3, timelineColumnId: "timerange_mm66x5c8", workerColumnId: "text_mm2gt925" },
-  { visitNumber: 4, timelineColumnId: "timerange_mm667jdx", workerColumnId: "text_mm2g3qja" },
-  { visitNumber: 5, timelineColumnId: "timerange_mm669j9q", workerColumnId: "text_mm2ga5e1" },
-  { visitNumber: 6, timelineColumnId: "timerange_mm66j89g", workerColumnId: "text_mm2ga5nw" },
-  { visitNumber: 7, timelineColumnId: "timerange_mm667awc", workerColumnId: "text_mm66qp82" },
-  { visitNumber: 8, timelineColumnId: "timerange_mm66f19k", workerColumnId: "text_mm6635cx" },
+  { visitNumber: 2, timelineColumnId: "timerange_mm66nc1j", workerColumnId: "text_mm2g31f4", onDeviceColumnId: "color_mm66aynx" },
+  { visitNumber: 3, timelineColumnId: "timerange_mm66x5c8", workerColumnId: "text_mm2gt925", onDeviceColumnId: "color_mm66t3y1" },
+  { visitNumber: 4, timelineColumnId: "timerange_mm667jdx", workerColumnId: "text_mm2g3qja", onDeviceColumnId: "color_mm66j7c" },
+  { visitNumber: 5, timelineColumnId: "timerange_mm669j9q", workerColumnId: "text_mm2ga5e1", onDeviceColumnId: "color_mm665wd2" },
+  { visitNumber: 6, timelineColumnId: "timerange_mm66j89g", workerColumnId: "text_mm2ga5nw", onDeviceColumnId: "color_mm665df4" },
+  { visitNumber: 7, timelineColumnId: "timerange_mm667awc", workerColumnId: "text_mm66qp82", onDeviceColumnId: "color_mm66pmfm" },
+  { visitNumber: 8, timelineColumnId: "timerange_mm66f19k", workerColumnId: "text_mm6635cx", onDeviceColumnId: "color_mm66vht4" },
 ];
 
 // ---------- Monday helper (with caching for idempotent queries) ----------
@@ -250,6 +251,9 @@ function getMatchingAssignmentVisits(columnValuesById, contractorNameKey) {
   return SUBITEM_ASSIGNMENT_PAIRS.flatMap((pair) => {
     const workerName = String(columnValuesById[pair.workerColumnId]?.text || "").trim();
     if (nameKey(workerName) !== contractorNameKey) return [];
+
+    const onDevice = String(columnValuesById[pair.onDeviceColumnId]?.text || "").trim();
+    if (onDevice !== "On Device") return [];
 
     return [{
       visitNumber: pair.visitNumber,
@@ -1990,6 +1994,7 @@ const cacheKey = `jobs:${contractorId}:${onDate}:${includeWeekends}:${page}:${li
       ...SUBITEM_ASSIGNMENT_PAIRS.flatMap((pair) => [
         pair.workerColumnId,
         pair.timelineColumnId,
+        pair.onDeviceColumnId,
       ]),
     ].filter(Boolean)));
 
@@ -2004,19 +2009,26 @@ const cacheKey = `jobs:${contractorId}:${onDate}:${includeWeekends}:${page}:${li
       parentDescriptionColId,
     ].filter(Boolean);
 
-    // Pull only On Device subitems, then match the logged-in worker across all visit slots.
+    // Fetch candidate subitems, then require On Device on the exact matching visit slot.
 const subitemsStatusOnlyFirstPageQ = `
   query(
     $boardId: ID!,
-    $filterCols: [String!],
-    $statusCol: ID!
+    $filterCols: [String!]
   ) {
     boards(ids: [$boardId]) {
       items_page(
         limit: 100,
         query_params: {
+          operator: or,
           rules: [
-            { column_id: $statusCol, operator: any_of, compare_value: [1] }
+            { column_id: "color_mkxwtxhe", operator: any_of, compare_value: [1] },
+            { column_id: "color_mm66aynx", operator: any_of, compare_value: [1] },
+            { column_id: "color_mm66t3y1", operator: any_of, compare_value: [1] },
+            { column_id: "color_mm66j7c", operator: any_of, compare_value: [1] },
+            { column_id: "color_mm665wd2", operator: any_of, compare_value: [1] },
+            { column_id: "color_mm665df4", operator: any_of, compare_value: [1] },
+            { column_id: "color_mm66pmfm", operator: any_of, compare_value: [1] },
+            { column_id: "color_mm66vht4", operator: any_of, compare_value: [1] }
           ]
         }
       ) {
@@ -2157,7 +2169,6 @@ do {
     : await monday(subitemsStatusOnlyFirstPageQ, {
         boardId: SUBITEMS_BOARD_ID,
         filterCols,
-        statusCol: SUBITEMS_ON_DEVICE_STATUS_COLUMN_ID,
       });
 
   const itemsPage = cursor
@@ -2172,11 +2183,6 @@ do {
 
   for (const s of items) {
     const sCols = Object.fromEntries((s.column_values || []).map((cv) => [cv.id, cv]));
-
-    const onDevice = String(
-      sCols[SUBITEMS_ON_DEVICE_STATUS_COLUMN_ID]?.text || ""
-    ).trim();
-    if (onDevice !== "On Device") continue;
 
     const matchingVisits = getMatchingAssignmentVisits(sCols, contractorNameKey);
 
@@ -2258,7 +2264,13 @@ do {
   }
 } while (cursor);
 
-const out = { items: results, total: totalPossible, page, limit };
+const out = {
+  items: results,
+  total: totalPossible,
+  page,
+  limit,
+  assignmentMode: "per_visit_on_device_v1",
+};
 cacheSet(cacheKey, out);
 console.log("[perf] jobs_my", JSON.stringify({
   contractorId,
