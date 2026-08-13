@@ -166,9 +166,11 @@ const SUBITEM_ASSIGNMENT_PAIRS = [
 ];
 
 // ---------- Monday helper (with caching for idempotent queries) ----------
-async function monday(query, variables = {}, isFile = false, form) {
-  const keyBase = isFile ? null : `m:${Buffer.from(query + "::" + JSON.stringify(variables)).toString("base64")}`;
-  if (!isFile) {
+async function monday(query, variables = {}, isFile = false, form, cacheResponse = true) {
+  const keyBase = isFile || !cacheResponse
+    ? null
+    : `m:${Buffer.from(query + "::" + JSON.stringify(variables)).toString("base64")}`;
+  if (keyBase) {
     const hit = cacheGet(keyBase);
     if (hit) return hit;
   }
@@ -190,7 +192,7 @@ headers: { "Content-Type": "application/json", Authorization: MONDAY_TOKEN },
     });
     const j = await r.json();
     if (j.errors) throw new Error(JSON.stringify(j.errors));
-    if (!isFile) cacheSet(keyBase, j.data);
+    if (keyBase) cacheSet(keyBase, j.data);
     return j.data;
   } catch (err) {
     console.error("monday() error:", err?.message || err);
@@ -1970,12 +1972,6 @@ const contractorNameKey = nameKey(contractorName);
     const offset = (page - 1) * limit;
 
     // ✅ cache key must NOT use `email` (not defined). Use contractorId.
-    const bust = String(req.query.bust || "");
-const cacheKey = `jobs:${contractorId}:${onDate}:${includeWeekends}:${page}:${limit}:${bust}`;
-    const hit = cacheGet(cacheKey);
-    if (hit) return res.json(hit);
-
- 
     // ✅ You no longer need to "find contractor id" by email.
     // contractorId is already provided by the app login flow / query param.
 
@@ -2165,11 +2161,11 @@ do {
     ? await monday(nextFilteredSubitemsQ, {
         cursor,
         filterCols,
-      })
+      }, false, undefined, false)
     : await monday(subitemsStatusOnlyFirstPageQ, {
         boardId: SUBITEMS_BOARD_ID,
         filterCols,
-      });
+      }, false, undefined, false);
 
   const itemsPage = cursor
     ? d?.next_items_page
@@ -2271,7 +2267,6 @@ const out = {
   limit,
   assignmentMode: "per_visit_on_device_v1",
 };
-cacheSet(cacheKey, out);
 console.log("[perf] jobs_my", JSON.stringify({
   contractorId,
   onDate,
