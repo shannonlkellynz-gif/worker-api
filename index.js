@@ -149,6 +149,21 @@ CONTRACTORS_LOGIN_NAME_COLUMN_ID,
   SUBITEMS_MAT_SUPPLIER_RELATION_COLUMN_ID,
 } = process.env;
 
+const SUBITEM_ASSIGNMENT_PAIRS = [
+  {
+    visitNumber: 1,
+    timelineColumnId: SUBITEMS_TIMELINE_COLUMN_ID || "timeline",
+    workerColumnId: SUBITEMS_SUBCONTRACTOR_TEXT_COLUMN_ID || "text_mkqsq1f7",
+  },
+  { visitNumber: 2, timelineColumnId: "timerange_mm66nc1j", workerColumnId: "text_mm2g31f4" },
+  { visitNumber: 3, timelineColumnId: "timerange_mm66x5c8", workerColumnId: "text_mm2gt925" },
+  { visitNumber: 4, timelineColumnId: "timerange_mm667jdx", workerColumnId: "text_mm2g3qja" },
+  { visitNumber: 5, timelineColumnId: "timerange_mm669j9q", workerColumnId: "text_mm2ga5e1" },
+  { visitNumber: 6, timelineColumnId: "timerange_mm66j89g", workerColumnId: "text_mm2ga5nw" },
+  { visitNumber: 7, timelineColumnId: "timerange_mm667awc", workerColumnId: "text_mm66qp82" },
+  { visitNumber: 8, timelineColumnId: "timerange_mm66f19k", workerColumnId: "text_mm6635cx" },
+];
+
 // ---------- Monday helper (with caching for idempotent queries) ----------
 async function monday(query, variables = {}, isFile = false, form) {
   const keyBase = isFile ? null : `m:${Buffer.from(query + "::" + JSON.stringify(variables)).toString("base64")}`;
@@ -213,6 +228,35 @@ function nameKey(s) {
   const first = parts[0] || "";
   const lastInitial = (parts[1] || "").slice(0, 1);
   return (first + lastInitial).replace(/[^a-z0-9]/g, "");
+}
+
+function parseAssignmentTimeline(columnValue) {
+  try {
+    const raw = columnValue?.value;
+    if (!raw) return { startDate: "", endDate: "" };
+
+    const value = typeof raw === "string" ? JSON.parse(raw) : raw;
+    const startDate = String(value?.from || "").trim();
+    const endDate = String(value?.to || value?.from || "").trim();
+    return { startDate, endDate };
+  } catch {
+    return { startDate: "", endDate: "" };
+  }
+}
+
+function getMatchingAssignmentVisits(columnValuesById, contractorNameKey) {
+  if (!contractorNameKey) return [];
+
+  return SUBITEM_ASSIGNMENT_PAIRS.flatMap((pair) => {
+    const workerName = String(columnValuesById[pair.workerColumnId]?.text || "").trim();
+    if (nameKey(workerName) !== contractorNameKey) return [];
+
+    return [{
+      visitNumber: pair.visitNumber,
+      workerName,
+      timeline: parseAssignmentTimeline(columnValuesById[pair.timelineColumnId]),
+    }];
+  });
 }
 // ✅ ADD THIS HERE
 async function getContractorNameById(contractorId) {
@@ -1941,11 +1985,13 @@ const cacheKey = `jobs:${contractorId}:${onDate}:${includeWeekends}:${page}:${li
       return res.status(500).json({ error: "SUBITEMS_ON_DEVICE_STATUS_COLUMN_ID missing in .env" });
     }
 
-    const filterCols = [
-      SUBITEMS_TIMELINE_COLUMN_ID,
+    const filterCols = Array.from(new Set([
       SUBITEMS_ON_DEVICE_STATUS_COLUMN_ID,
-      SUBITEMS_SUBCONTRACTOR_TEXT_COLUMN_ID,
-    ].filter(Boolean);
+      ...SUBITEM_ASSIGNMENT_PAIRS.flatMap((pair) => [
+        pair.workerColumnId,
+        pair.timelineColumnId,
+      ]),
+    ].filter(Boolean)));
 
     const detailCols = [
       SUBITEMS_JOBNUMBER_COLUMN_ID,
@@ -1958,43 +2004,7 @@ const cacheKey = `jobs:${contractorId}:${onDate}:${includeWeekends}:${page}:${li
       parentDescriptionColId,
     ].filter(Boolean);
 
-    // 1) Pull ONLY subitems where On Device == "On Device"
-    const contractorNameCompareLiteral = JSON.stringify(contractorName || "");
-
-const subitemsFilteredFirstPageQ = `
-  query(
-    $boardId: ID!,
-    $filterCols: [String!],
-    $statusCol: ID!,
-    $contractorCol: ID!
-  ) {
-    boards(ids: [$boardId]) {
-      items_page(
-        limit: 100,
-        query_params: {
-          operator: and,
-          rules: [
-            { column_id: $statusCol, operator: any_of, compare_value: [1] },
-            { column_id: $contractorCol, operator: contains_text, compare_value: [${contractorNameCompareLiteral}] }
-          ]
-        }
-      ) {
-        cursor
-        items {
-          id
-          name
-          parent_item { id }
-          column_values(ids: $filterCols) {
-            id
-            text
-            value
-          }
-        }
-      }
-    }
-  }
-`;
-
+    // Pull only On Device subitems, then match the logged-in worker across all visit slots.
 const subitemsStatusOnlyFirstPageQ = `
   query(
     $boardId: ID!,
@@ -2139,32 +2149,16 @@ let parentMetaMs = 0;
 const tSubitemScan = Date.now();
 
 do {
-  const useContractorServerFilter =
-    !!contractorName &&
-    !!SUBITEMS_SUBCONTRACTOR_TEXT_COLUMN_ID;
-
   const d = cursor
     ? await monday(nextFilteredSubitemsQ, {
         cursor,
         filterCols,
       })
-    : await monday(
-        useContractorServerFilter
-          ? subitemsFilteredFirstPageQ
-          : subitemsStatusOnlyFirstPageQ,
-        useContractorServerFilter
-          ? {
-              boardId: SUBITEMS_BOARD_ID,
-              filterCols,
-              statusCol: SUBITEMS_ON_DEVICE_STATUS_COLUMN_ID,
-              contractorCol: SUBITEMS_SUBCONTRACTOR_TEXT_COLUMN_ID,
-            }
-          : {
-              boardId: SUBITEMS_BOARD_ID,
-              filterCols,
-              statusCol: SUBITEMS_ON_DEVICE_STATUS_COLUMN_ID,
-            }
-      );
+    : await monday(subitemsStatusOnlyFirstPageQ, {
+        boardId: SUBITEMS_BOARD_ID,
+        filterCols,
+        statusCol: SUBITEMS_ON_DEVICE_STATUS_COLUMN_ID,
+      });
 
   const itemsPage = cursor
     ? d?.next_items_page
@@ -2184,43 +2178,37 @@ do {
     ).trim();
     if (onDevice !== "On Device") continue;
 
-    const subTxt = String(sCols[SUBITEMS_SUBCONTRACTOR_TEXT_COLUMN_ID]?.text || "").trim();
+    const matchingVisits = getMatchingAssignmentVisits(sCols, contractorNameKey);
 
-    if (!contractorNameKey) continue;
-    if (nameKey(subTxt) !== contractorNameKey) continue;
+    for (const visit of matchingVisits) {
+      const { startDate, endDate } = visit.timeline;
 
-    let startDate = "", endDate = "";
-    try {
-      const tlVal = sCols[SUBITEMS_TIMELINE_COLUMN_ID]?.value;
-      if (tlVal) {
-        const tl = typeof tlVal === "string" ? JSON.parse(tlVal) : tlVal;
-        startDate = tl?.from || "";
-        endDate = tl?.to || tl?.from || "";
+      if (onDate) {
+        if (!includeWeekends && isWeekend(onDate)) continue;
+        if (!(onDate >= startDate && onDate <= endDate)) continue;
       }
-    } catch {}
 
-    if (onDate) {
-      if (!includeWeekends && isWeekend(onDate)) continue;
-      if (!(onDate >= startDate && onDate <= endDate)) continue;
+      totalPossible++;
+
+      if (totalPossible > offset && collected < limit) {
+        selected.push({
+          parentId: String(s?.parent_item?.id || ""),
+          subitemId: String(s.id),
+          subitemName: s.name,
+          visitNumber: visit.visitNumber,
+          timeline: visit.timeline,
+        });
+
+        collected++;
+      }
+
+      if (collected >= limit) {
+        cursor = null;
+        break;
+      }
     }
 
-    totalPossible++;
-
-    if (totalPossible > offset && collected < limit) {
-      selected.push({
-        parentId: String(s?.parent_item?.id || ""),
-        subitemId: String(s.id),
-        subitemName: s.name,
-        timeline: { startDate, endDate },
-      });
-
-      collected++;
-    }
-
-    if (collected >= limit) {
-      cursor = null;
-      break;
-    }
+    if (collected >= limit) break;
   }
 
   const selectedIds = selected.map((s) => s.subitemId).filter(Boolean);
@@ -2249,6 +2237,7 @@ do {
     parentJobName: "",
     subitemId: s.subitemId,
     subitemName: s.subitemName,
+    visitNumber: s.visitNumber,
     jobNumber: selectedMetaById[s.subitemId]?.jobNumber || "",
     description: selectedMetaById[s.subitemId]?.description || "",
     timeline: s.timeline,
